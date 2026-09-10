@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import random
 import re
 import json
@@ -15,7 +16,7 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.0 (https://bsky.app/; personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.1 (https://bsky.app/; personal curation bot)"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
@@ -104,65 +105,73 @@ def fit_complete_sentences(text, max_len):
 
 def generate_ai_curated_post(title, extract, available_budget):
     """
-    Gemini 2.5 Flash ile konunun neden tuhaf olduğunu anlatan
-    kalan bütçeye tam oturan mikro bir metin ve tek bir emoji üretir.
+    Gemini 2.5 Flash ile konunun garipliğini anlatan özgün mikro anlatı ve emoji üretir.
+    Zaman aşımı 35 saniyeye yükseltilmiş ve 3 denemeli döngü eklenmiştir.
     """
     if not GEMINI_API_KEY:
+        print("Uyarı: GEMINI_API_KEY tanımlı değil.")
         return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
     prompt = (
         "You are the curator of a popular Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
         f"Article Title: {title}\n"
-        f"Article Summary: {extract}\n\n"
+        f"Article Background Details: {extract}\n\n"
         "Task:\n"
-        "1. Select ONE single emoji that captures the core essence, absurdity, or subject of this story.\n"
-        "2. Write an engaging, curiosity-sparking 1-2 sentence micro-narrative explaining WHY this topic is so strange or remarkable.\n\n"
+        "1. Select ONE single emoji that captures the essence, absurdity, or subject of this story.\n"
+        "2. Do NOT copy the Wikipedia sentences. Instead, write an ORIGINAL, engaging, and witty 1-2 sentence micro-narrative "
+        "explaining WHY this topic is so strange, unbelievable, or hilarious.\n\n"
         "Strict Constraints:\n"
-        f"- The narrative MUST NOT exceed {available_budget} characters under any circumstance.\n"
-        "- Must end with a complete sentence (never truncate or cut off mid-thought).\n"
-        "- The text must be in English.\n"
-        "- Do not repeat or mention the article title at the start.\n"
-        "- Do not include links or hashtags.\n"
-        "- Output strictly valid JSON with two keys: \"emoji\" and \"narrative\"."
+        f"- The narrative MUST NOT exceed {available_budget} characters.\n"
+        "- Must end with a complete sentence.\n"
+        "- Write strictly in English.\n"
+        "- Do not start with or repeat the article title.\n"
+        "- Do not include hashtags or URLs.\n"
+        "- Output strictly valid JSON format with keys: \"emoji\" and \"narrative\"."
     )
 
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
-            "response_mime_type": "application/json"
+            "response_mime_type": "application/json",
+            "maxOutputTokens": 200,
+            "temperature": 0.8
         }
     }
 
-    try:
-        resp = requests.post(url, json=payload, timeout=15)
-        if resp.status_code == 200:
-            result = resp.json()
-            raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-            data = json.loads(raw_text)
+    # 3 Kez yeniden deneme döngüsü (Retry Loop)
+    for attempt in range(1, 4):
+        try:
+            print(f"Gemini API çağrılıyor (Deneme {attempt}/3)...")
+            resp = requests.post(url, json=payload, timeout=35)
             
-            emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
-            narrative = data.get("narrative", "").strip()
-            
-            # Uzunluk garantisi kontrolü
-            if len(narrative) > available_budget:
-                narrative = fit_complete_sentences(narrative, available_budget)
+            if resp.status_code == 200:
+                result = resp.json()
+                raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+                data = json.loads(raw_text)
                 
-            print(f"Yapay Zeka Metni ({len(narrative)} kr): {narrative}")
-            return emoji, narrative
-        else:
-            print(f"Gemini API Hatası ({resp.status_code}): {resp.text}")
-    except Exception as e:
-        print(f"Yapay zeka üretim hatası: {e}")
+                emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
+                narrative = data.get("narrative", "").strip()
+                
+                if narrative:
+                    if len(narrative) > available_budget:
+                        narrative = fit_complete_sentences(narrative, available_budget)
+                    print(f"Yapay Zeka Metni Başarıyla Üretildi ({len(narrative)} kr):\n{narrative}")
+                    return emoji, narrative
+            else:
+                print(f"Gemini API Yanıt Hatası (HTTP {resp.status_code}): {resp.text}")
+        except Exception as e:
+            print(f"Gemini bağlantı/zaman aşımı hatası (Deneme {attempt}): {e}")
+        
+        time.sleep(2)
 
+    print("Gemini tüm denemelerde yanıt vermedi, acil durum formatına geçiliyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
 def build_post(title, extract, page_url):
     builder = client_utils.TextBuilder()
 
-    # Başlık alanı: emoji (2) + boşluk (1) + başlık + 2x newline (2)
     header_text_without_emoji = f" {title.upper()}\n\n"
-    # Bluesky'ın 300 grafem sınırından başlık ve 3 karakterlik güvenlik payını düş
     header_cost = 2 + len(header_text_without_emoji)
     available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_cost - 3
 
@@ -173,7 +182,7 @@ def build_post(title, extract, page_url):
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
 
-    # 2. Üretilen Anlatı
+    # 2. Yapay zekanın yazdığı özgün metin
     builder.text(narrative)
 
     return builder
