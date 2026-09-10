@@ -1,0 +1,38 @@
+name: Wikipedia Bot to Bluesky
+
+on:
+  schedule:
+    - cron: '0 9 * * *'
+  workflow_dispatch:
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Depoyu Klonla
+        uses: actions/checkout@v4
+
+      - name: Python Ortamını Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Bağımlılıkları Yükle
+        run: |
+          pip install atproto requests pillow
+
+      - name: Botu Çalıştır
+        env:
+          BSKY_HANDLE: ${{ secrets.tyyaman }}
+          BSKY_APP_PASSWORD: ${{ secrets.n6dx-4wfl-5or4-vbgy }}
+        run: python wiki_bot.py
+
+      - name: Hafızayı Kaydet
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted_articles.txt
+          git diff --staged --quiet || (git commit -m "chore: update posted wiki archive" && git push)
