@@ -12,10 +12,9 @@ BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/2.1 (contact@example.com)"
+    "User-Agent": "BlueskyUnusualWikiBot/2.2 (contact@example.com)"
 }
 
-# Konu ve bağlama göre emoji eşleştirme havuzu
 CONTEXT_EMOJIS = [
     ("⚔️", ["war", "battle", "military", "army", "soldier", "weapon", "conflict", "siege", "savaş", "asker", "ordu", "silah"]),
     ("🐾", ["animal", "dog", "cat", "bird", "emu", "mammal", "fish", "insect", "species", "creature", "hayvan", "kuş", "tür"]),
@@ -39,7 +38,6 @@ CONTEXT_EMOJIS = [
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨"]
 
 def detect_context_emoji(text):
-    """Metindeki anahtar kelimeleri analiz ederek en uygun emojiyi seçer."""
     clean_text = text.lower()
     for emoji, keywords in CONTEXT_EMOJIS:
         for kw in keywords:
@@ -96,39 +94,52 @@ def optimize_image(img_bytes):
     except Exception:
         return img_bytes
 
-def smart_truncate(text, max_len):
-    """Metni cümle bütünlüğünü gözeterek 300 grafeme yaklaştırır."""
-    if len(text) <= max_len:
-        return text
-
-    truncated = text[:max_len - 1]
-    last_punct = max(truncated.rfind('. '), truncated.rfind('! '), truncated.rfind('? '))
-    if last_punct > max_len * 0.70:
-        return truncated[:last_punct + 1]
-
-    last_space = truncated.rfind(' ')
-    if last_space > 0:
-        truncated = truncated[:last_space]
+def fit_complete_sentences(text, max_len):
+    """Metni cümlelerine ayırır ve bütçeye tam sığan cümleleri alır; asla yarım cümle bırakmaz."""
+    # Noktalama işaretlerinden sonraki boşluklardan böl
+    raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    
+    collected = []
+    current_len = 0
+    
+    for s in raw_sentences:
+        s = s.strip()
+        if not s:
+            continue
+        # Araya eklenecek boşluk payını hesaba kat
+        added_len = len(s) if not collected else len(s) + 1
         
-    return truncated.rstrip() + "…"
+        if current_len + added_len <= max_len:
+            collected.append(s)
+            current_len += added_len
+        else:
+            # Sıradaki cümle bütçeyi aşıyorsa dur; asla yarım başlatma
+            break
+            
+    if collected:
+        return " ".join(collected)
+        
+    # İlk cümle tek başına bile bütçeden uzunsa: son mantıklı kelimeden kes
+    first = raw_sentences[0]
+    truncated = first[:max_len - 1]
+    last_space = truncated.rfind(' ')
+    return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
 def build_post(title, extract, page_url):
-    """Başlığı tıklanabilir link yapar, kalan ~260-280 karakteri özetle doldurur."""
     emoji = detect_context_emoji(f"{title} {extract}")
     builder = client_utils.TextBuilder()
 
-    # 1. Emoji
+    # 1. Emoji ve Başlık (Doğrudan Wikipedia linki)
     builder.text(f"{emoji} ")
-    
-    # 2. Tıklanabilir Başlık (Ekstra satır/footer harcamadan doğrudan linklenir)
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
 
-    # 3. Kalan karakter bütçesinin tamamını metne ver (300 sınırına göre)
-    header_len = 2 + len(title) + 2  # emoji + boşluk + başlık + 2 newline
+    # 2. 300 grafem bütçesinden başlık payını düş
+    header_len = 2 + len(title) + 2
     available_budget = 295 - header_len
     
-    body = smart_truncate(extract, available_budget)
+    # 3. Yalnızca eksiksiz biten cümleleri ekle
+    body = fit_complete_sentences(extract, available_budget)
     builder.text(body)
 
     return builder
