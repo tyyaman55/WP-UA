@@ -17,12 +17,19 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.4 (https://bsky.app/; personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.5 (https://bsky.app/; personal curation bot)"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
 MAX_BLOB_IMAGE_SIZE = 950_000
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
+
+def clean_url(raw_url):
+    """Tarayıcı veya GitHub editörünün oluşturduğu [link](link) markdown kalıntılarını temizler."""
+    if not raw_url:
+        return raw_url
+    match = re.search(r'https?://[^\s)\]"\']+', str(raw_url))
+    return match.group(0) if match else raw_url
 
 def get_posted_titles():
     if os.path.exists(STATE_FILE):
@@ -35,7 +42,7 @@ def save_posted_title(title):
         f.write(f"{title}\n")
 
 def get_unusual_articles():
-    url = "https://en.wikipedia.org/w/api.php"
+    url = clean_url("https://en.wikipedia.org/w/api.php")
     params = {
         "action": "parse",
         "page": "Wikipedia:Unusual_articles",
@@ -58,7 +65,7 @@ def get_unusual_articles():
 
 def fetch_summary(title):
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
+    url = clean_url(f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}")
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
@@ -124,7 +131,7 @@ def request_gemini(prompt):
     if not GEMINI_API_KEY:
         return None
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = clean_url(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}")
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -163,7 +170,7 @@ def request_groq(prompt):
         print("GROQ_API_KEY tanımlı değil, Groq yedek adımı atlanıyor.")
         return None
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = clean_url("https://api.groq.com/openai/v1/chat/completions")
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -285,7 +292,7 @@ def main():
     image_bytes = None
     if img_url:
         try:
-            r = requests.get(img_url, headers=HEADERS, timeout=20)
+            r = requests.get(clean_url(img_url), headers=HEADERS, timeout=20)
             if r.status_code == 200:
                 image_bytes = optimize_image(r.content)
         except Exception as e:
