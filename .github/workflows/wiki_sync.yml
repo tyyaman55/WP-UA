@@ -39,10 +39,24 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
         run: python wiki_bot.py
 
-      - name: Hafızayı Kaydet (Akıllı Çakışma Çözücü)
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update posted wiki archive [skip ci]"
-          file_pattern: posted_articles.txt
-          commit_user_name: github-actions[bot]
-          commit_user_email: github-actions[bot]@users.noreply.github.com
+      - name: Hafızayı Kaydet
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add posted_articles.txt
+          if git diff --staged --quiet; then
+            echo "Değişiklik yok, commit atlanıyor."
+            exit 0
+          fi
+          git commit -m "chore: update posted wiki archive [skip ci]"
+          for i in 1 2 3 4 5; do
+            if git push; then
+              echo "Push başarılı."
+              exit 0
+            fi
+            echo "Push reddedildi, remote değişiklikleri alınıp tekrar deneniyor (deneme $i)..."
+            git pull --rebase origin main
+            sleep 2
+          done
+          echo "5 denemeden sonra push başarısız oldu."
+          exit 1
