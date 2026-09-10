@@ -13,10 +13,11 @@ from atproto import Client, client_utils
 BSKY_HANDLE = os.environ.get("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.1 (https://bsky.app/; personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.2 (https://bsky.app/; personal curation bot)"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
@@ -103,15 +104,66 @@ def fit_complete_sentences(text, max_len):
     last_space = truncated.rfind(' ')
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
-def generate_ai_curated_post(title, extract, available_budget):
-    """
-    Gemini 2.5 Flash ile konunun garipliğini anlatan özgün mikro anlatı ve emoji üretir.
-    Zaman aşımı 35 saniyeye yükseltilmiş ve 3 denemeli döngü eklenmiştir.
-    """
+def request_gemini(prompt):
+    """Birincil sağlayıcı: Google Gemini 2.5 Flash"""
     if not GEMINI_API_KEY:
-        print("Uyarı: GEMINI_API_KEY tanımlı değil.")
-        return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
+        return None
+        
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json",
+            "maxOutputTokens": 200,
+            "temperature": 0.8
+        }
+    }
+    
+    try:
+        print("Gemini API çağrılıyor...")
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code == 200:
+            result = resp.json()
+            raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(raw_text)
+        print(f"Gemini yanıt vermedi (HTTP {resp.status_code}): {resp.text}")
+    except Exception as e:
+        print(f"Gemini bağlantı/zaman aşımı hatası: {e}")
+    return None
 
+def request_groq(prompt):
+    """Yedek sağlayıcı: Groq (Llama 3.3 70B Versatile)"""
+    if not GROQ_API_KEY:
+        print("GROQ_API_KEY tanımlı değil, Groq yedek adımı atlanıyor.")
+        return None
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.3-70b-versatile",
+        "messages": [{"role": "user", "content": prompt}],
+        "response_format": {"type": "json_object"},
+        "temperature": 0.7,
+        "max_tokens": 200
+    }
+
+    try:
+        print("Groq API devreye giriyor (Llama 3.3 70B)...")
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        if resp.status_code == 200:
+            result = resp.json()
+            raw_text = result["choices"][0]["message"]["content"]
+            return json.loads(raw_text)
+        print(f"Groq API hatası (HTTP {resp.status_code}): {resp.text}")
+    except Exception as e:
+        print(f"Groq bağlantı hatası: {e}")
+    return None
+
+def generate_ai_curated_post(title, extract, available_budget):
+    """Gemini ve Groq fallback zinciriyle metin ve emoji üretir."""
     prompt = (
         "You are the curator of a popular Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
         f"Article Title: {title}\n"
@@ -129,43 +181,26 @@ def generate_ai_curated_post(title, extract, available_budget):
         "- Output strictly valid JSON format with keys: \"emoji\" and \"narrative\"."
     )
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "response_mime_type": "application/json",
-            "maxOutputTokens": 200,
-            "temperature": 0.8
-        }
-    }
+    data = None
+    # 1. Öncelik: Gemini
+    if GEMINI_API_KEY:
+        data = request_gemini(prompt)
 
-    # 3 Kez yeniden deneme döngüsü (Retry Loop)
-    for attempt in range(1, 4):
-        try:
-            print(f"Gemini API çağrılıyor (Deneme {attempt}/3)...")
-            resp = requests.post(url, json=payload, timeout=35)
-            
-            if resp.status_code == 200:
-                result = resp.json()
-                raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-                data = json.loads(raw_text)
-                
-                emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
-                narrative = data.get("narrative", "").strip()
-                
-                if narrative:
-                    if len(narrative) > available_budget:
-                        narrative = fit_complete_sentences(narrative, available_budget)
-                    print(f"Yapay Zeka Metni Başarıyla Üretildi ({len(narrative)} kr):\n{narrative}")
-                    return emoji, narrative
-            else:
-                print(f"Gemini API Yanıt Hatası (HTTP {resp.status_code}): {resp.text}")
-        except Exception as e:
-            print(f"Gemini bağlantı/zaman aşımı hatası (Deneme {attempt}): {e}")
-        
-        time.sleep(2)
+    # 2. Öncelik (Fallback): Groq
+    if not data and GROQ_API_KEY:
+        data = request_groq(prompt)
 
-    print("Gemini tüm denemelerde yanıt vermedi, acil durum formatına geçiliyor.")
+    # Başarılı JSON yanıtı kontrolü
+    if data:
+        emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
+        narrative = data.get("narrative", "").strip()
+        if narrative:
+            if len(narrative) > available_budget:
+                narrative = fit_complete_sentences(narrative, available_budget)
+            print(f"Yapay zeka metni başarıyla üretildi ({len(narrative)} kr):\n{narrative}")
+            return emoji, narrative
+
+    print("Yapay zeka sağlayıcıları yanıt vermedi, acil durum metin formatına geçiliyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
 def build_post(title, extract, page_url):
@@ -177,12 +212,9 @@ def build_post(title, extract, page_url):
 
     emoji, narrative = generate_ai_curated_post(title, extract, available_narrative_budget)
 
-    # 1. Emoji ve Tıklanabilir Başlık
     builder.text(f"{emoji} ")
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
-
-    # 2. Yapay zekanın yazdığı özgün metin
     builder.text(narrative)
 
     return builder
