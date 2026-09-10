@@ -1,6 +1,7 @@
 import os
 import sys
 import random
+import re
 import requests
 from io import BytesIO
 from PIL import Image
@@ -11,8 +12,40 @@ BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/2.0 (contact@example.com)"
+    "User-Agent": "BlueskyUnusualWikiBot/2.1 (contact@example.com)"
 }
+
+# Konu ve bağlama göre emoji eşleştirme havuzu
+CONTEXT_EMOJIS = [
+    ("⚔️", ["war", "battle", "military", "army", "soldier", "weapon", "conflict", "siege", "savaş", "asker", "ordu", "silah"]),
+    ("🐾", ["animal", "dog", "cat", "bird", "emu", "mammal", "fish", "insect", "species", "creature", "hayvan", "kuş", "tür"]),
+    ("🚀", ["space", "astronomy", "planet", "orbit", "moon", "star", "satellite", "nasa", "uzay", "gezegen", "yıldız"]),
+    ("🎨", ["art", "painting", "sculpture", "museum", "artist", "exhibition", "sanat", "tablo", "ressam", "heykel"]),
+    ("🎵", ["music", "song", "album", "band", "singer", "opera", "orchestra", "müzik", "şarkı", "albüm"]),
+    ("🕵️", ["crime", "murder", "theft", "hoax", "conspiracy", "mystery", "investigation", "cinayet", "suç", "gizem", "hırsızlık"]),
+    ("🍲", ["food", "dish", "cuisine", "recipe", "beer", "wine", "bread", "cheese", "fruit", "yemek", "mutfak", "içecek"]),
+    ("⚽", ["sport", "football", "match", "player", "olympic", "race", "tournament", "spor", "futbol", "maç", "yarış"]),
+    ("👑", ["king", "queen", "emperor", "monarch", "royal", "empire", "kral", "kraliçe", "imparator", "hanedan"]),
+    ("🧪", ["science", "chemical", "physics", "experiment", "laboratory", "element", "kimya", "fizik", "deney", "laboratuvar"]),
+    ("💀", ["death", "corpse", "cemetery", "grave", "funeral", "skeleton", "ölüm", "mezar", "iskelet"]),
+    ("✈️", ["aircraft", "airplane", "flight", "pilot", "aviation", "crash", "uçak", "havacılık", "uçuş"]),
+    ("🚢", ["ship", "boat", "submarine", "naval", "ocean", "sea", "sailor", "gemi", "denizaltı", "deniz"]),
+    ("🏛️", ["politics", "government", "parliament", "president", "law", "court", "hükümet", "yasa", "mahkeme"]),
+    ("💰", ["money", "currency", "bank", "gold", "economy", "millionaire", "para", "ekonomi", "banka", "altın"]),
+    ("🌍", ["island", "country", "mountain", "river", "volcano", "city", "geography", "ada", "ülke", "dağ", "nehir", "şehir"]),
+    ("👻", ["ghost", "curse", "myth", "monster", "legend", "folklore", "canavar", "efsane", "hayalet", "lanet"]),
+]
+
+FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨"]
+
+def detect_context_emoji(text):
+    """Metindeki anahtar kelimeleri analiz ederek en uygun emojiyi seçer."""
+    clean_text = text.lower()
+    for emoji, keywords in CONTEXT_EMOJIS:
+        for kw in keywords:
+            if re.search(rf"\b{re.escape(kw)}\b", clean_text):
+                return emoji
+    return random.choice(FALLBACK_EMOJIS)
 
 def get_posted_titles():
     if os.path.exists(STATE_FILE):
@@ -55,7 +88,6 @@ def optimize_image(img_bytes):
         img = Image.open(BytesIO(img_bytes))
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        # Kaliteyi koruyarak en boy oranını 1600px ile sınırla
         img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
         
         buffer = BytesIO()
@@ -64,47 +96,40 @@ def optimize_image(img_bytes):
     except Exception:
         return img_bytes
 
-def smart_truncate_text(text, max_len):
-    """Metni kelime veya cümle sonundan bölerek maksimum uzunluğa ulaştırır."""
+def smart_truncate(text, max_len):
+    """Metni cümle bütünlüğünü gözeterek 300 grafeme yaklaştırır."""
     if len(text) <= max_len:
         return text
 
     truncated = text[:max_len - 1]
-    
-    # Mümkünse en yakın cümle sonundan (. ! ?) kes
-    last_dot = max(truncated.rfind('. '), truncated.rfind('! '), truncated.rfind('? '))
-    if last_dot > max_len * 0.65:
-        return truncated[:last_dot + 1]
+    last_punct = max(truncated.rfind('. '), truncated.rfind('! '), truncated.rfind('? '))
+    if last_punct > max_len * 0.70:
+        return truncated[:last_punct + 1]
 
-    # Cümle sonu yoksa son boşluktan kes
     last_space = truncated.rfind(' ')
     if last_space > 0:
         truncated = truncated[:last_space]
         
     return truncated.rstrip() + "…"
 
-def build_dense_post(title, extract, page_url):
-    """300 grafem sınırını maksimum bilgiyle dolduran zengin metin mimarı."""
+def build_post(title, extract, page_url):
+    """Başlığı tıklanabilir link yapar, kalan ~260-280 karakteri özetle doldurur."""
+    emoji = detect_context_emoji(f"{title} {extract}")
     builder = client_utils.TextBuilder()
 
-    header = f"📌 {title.upper()}\n\n"
-    footer_plain = "\n\n📖 Maddenin Tamamı • #Vikipedi #Sıradışı"
+    # 1. Emoji
+    builder.text(f"{emoji} ")
     
-    # 300 sınırdan sabit alanları ve güvenlik payını (5 karakter) düş
-    budget = 295 - len(header) - len(footer_plain)
-    body = smart_truncate_text(extract, budget)
-
-    # 1. Başlık
-    builder.text(header)
-    # 2. Yoğun Bilgi Gövdesi
-    builder.text(body)
-    # 3. Zengin Altbilgi
+    # 2. Tıklanabilir Başlık (Ekstra satır/footer harcamadan doğrudan linklenir)
+    builder.link(title.upper(), page_url)
     builder.text("\n\n")
-    builder.link("📖 Maddenin Tamamı", page_url)
-    builder.text(" • ")
-    builder.tag("#Vikipedi", "Vikipedi")
-    builder.text(" ")
-    builder.tag("#Sıradışı", "Sıradışı")
+
+    # 3. Kalan karakter bütçesinin tamamını metne ver (300 sınırına göre)
+    header_len = 2 + len(title) + 2  # emoji + boşluk + başlık + 2 newline
+    available_budget = 295 - header_len
+    
+    body = smart_truncate(extract, available_budget)
+    builder.text(body)
 
     return builder
 
@@ -120,7 +145,6 @@ def main():
     target_data = None
     for cand in unposted[:15]:
         data = fetch_summary(cand)
-        # Sadece açıklaması olan ve standart maddeleri kabul et
         if data and data.get("type") == "standard" and data.get("extract"):
             target_data = data
             break
@@ -133,7 +157,6 @@ def main():
     extract = target_data.get("extract", "").strip()
     page_url = target_data.get("content_urls", {}).get("desktop", {}).get("page", "")
     
-    # Varsa yüksek çözünürlüklü görseli, yoksa thumbnail'ı seç
     img_url = (
         target_data.get("originalimage", {}).get("source") or 
         target_data.get("thumbnail", {}).get("source")
@@ -151,14 +174,14 @@ def main():
     client = Client()
     client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
 
-    rich_text = build_dense_post(title, extract, page_url)
+    rich_text = build_post(title, extract, page_url)
 
     try:
         if image_bytes:
             client.send_image(
                 text=rich_text,
                 image=image_bytes,
-                image_alt=f"{title} konulu Vikipedi arşiv görseli"
+                image_alt=f"{title} Wikipedia görseli"
             )
         else:
             client.send_post(text=rich_text)
