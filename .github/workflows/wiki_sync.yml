@@ -2,7 +2,7 @@ name: Wikipedia Bot to Bluesky
 
 on:
   schedule:
-    - cron: '0 9 * * *'
+    - cron: '0 9,15,21 * * *'
   workflow_dispatch:
 
 jobs:
@@ -26,8 +26,8 @@ jobs:
 
       - name: Botu Çalıştır
         env:
-          BSKY_HANDLE: ${{ tyyaman }}
-          BSKY_APP_PASSWORD: ${{ sn6dx-4wfl-5or4-vbgy }}
+          BSKY_HANDLE: ${{ secrets.BSKY_HANDLE }}
+          BSKY_APP_PASSWORD: ${{ secrets.BSKY_APP_PASSWORD }}
         run: python wiki_bot.py
 
       - name: Hafızayı Kaydet
