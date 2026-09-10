@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import re
+import urllib.parse
 import requests
 from io import BytesIO
 from PIL import Image
@@ -11,8 +12,9 @@ BSKY_HANDLE = os.environ.get("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
 STATE_FILE = "posted_articles.txt"
 
+# Wikipedia API standartlarına uygun User-Agent
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/2.2 (contact@example.com)"
+    "User-Agent": "BlueskyUnusualWikiBot/2.3 (https://bsky.app/; personal automation bot)"
 }
 
 CONTEXT_EMOJIS = [
@@ -64,21 +66,34 @@ def get_unusual_articles():
         "format": "json"
     }
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=15)
-        links = resp.json().get("parse", {}).get("links", [])
-        return [l["*"] for l in links if l.get("ns") == 0 and "exists" in l]
-    except Exception:
+        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
+        data = resp.json()
+        links = data.get("parse", {}).get("links", [])
+        
+        # Sadece ana madde uzayındaki (ns: 0) ve var olan sayfaları al
+        articles = [
+            l["*"] for l in links 
+            if l.get("ns") == 0 and "exists" in l and not l["*"].startswith("List of")
+        ]
+        print(f"Toplam bulunan sıra dışı madde sayısı: {len(articles)}")
+        return articles
+    except Exception as e:
+        print(f"Madde listesi alınırken hata oluştu: {e}")
         return []
 
 def fetch_summary(title):
-    safe_title = title.replace(" ", "_")
+    # Özel karakterleri ve boşlukları URL uyumlu hale getir
+    safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
     url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
+    
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
             return resp.json()
-    except Exception:
-        pass
+        else:
+            print(f"Atlandı: {title} (HTTP {resp.status_code})")
+    except Exception as e:
+        print(f"Özet çekme hatası ({title}): {e}")
     return None
 
 def optimize_image(img_bytes):
@@ -95,10 +110,7 @@ def optimize_image(img_bytes):
         return img_bytes
 
 def fit_complete_sentences(text, max_len):
-    """Metni cümlelerine ayırır ve bütçeye tam sığan cümleleri alır; asla yarım cümle bırakmaz."""
-    # Noktalama işaretlerinden sonraki boşluklardan böl
     raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    
     collected = []
     current_len = 0
     
@@ -106,20 +118,17 @@ def fit_complete_sentences(text, max_len):
         s = s.strip()
         if not s:
             continue
-        # Araya eklenecek boşluk payını hesaba kat
         added_len = len(s) if not collected else len(s) + 1
         
         if current_len + added_len <= max_len:
             collected.append(s)
             current_len += added_len
         else:
-            # Sıradaki cümle bütçeyi aşıyorsa dur; asla yarım başlatma
             break
             
     if collected:
         return " ".join(collected)
         
-    # İlk cümle tek başına bile bütçeden uzunsa: son mantıklı kelimeden kes
     first = raw_sentences[0]
     truncated = first[:max_len - 1]
     last_space = truncated.rfind(' ')
@@ -129,16 +138,13 @@ def build_post(title, extract, page_url):
     emoji = detect_context_emoji(f"{title} {extract}")
     builder = client_utils.TextBuilder()
 
-    # 1. Emoji ve Başlık (Doğrudan Wikipedia linki)
     builder.text(f"{emoji} ")
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
 
-    # 2. 300 grafem bütçesinden başlık payını düş
     header_len = 2 + len(title) + 2
     available_budget = 295 - header_len
     
-    # 3. Yalnızca eksiksiz biten cümleleri ekle
     body = fit_complete_sentences(extract, available_budget)
     builder.text(body)
 
@@ -146,22 +152,32 @@ def build_post(title, extract, page_url):
 
 def main():
     if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
+        print("Kimlik bilgileri eksik.")
         sys.exit(1)
 
     posted = get_posted_titles()
     candidates = get_unusual_articles()
+    
+    if not candidates:
+        print("Aday listesi boş geldi.")
+        return
+
     unposted = [c for c in candidates if c not in posted]
+    print(f"Daha önce paylaşılmamış madde sayısı: {len(unposted)}")
+    
     random.shuffle(unposted)
 
     target_data = None
-    for cand in unposted[:15]:
+    # Kota 50'ye çıkarıldı: Uygun madde bulunana kadar dener
+    for cand in unposted[:50]:
         data = fetch_summary(cand)
         if data and data.get("type") == "standard" and data.get("extract"):
             target_data = data
+            print(f"Seçilen madde: {cand}")
             break
 
     if not target_data:
-        print("Uygun içerikli madde bulunamadı.")
+        print("50 aday tarandı ancak uygun içerik bulunamadı.")
         return
 
     title = target_data.get("title")
@@ -180,7 +196,7 @@ def main():
             if r.status_code == 200:
                 image_bytes = optimize_image(r.content)
         except Exception as e:
-            print(f"Görsel alınamadı: {e}")
+            print(f"Görsel indirilemedi: {e}")
 
     client = Client()
     client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
@@ -197,7 +213,7 @@ def main():
         else:
             client.send_post(text=rich_text)
 
-        print(f"Paylaşıldı: {title}")
+        print(f"Bluesky'a başarıyla paylaşıldı: {title}")
         save_posted_title(title)
     except Exception as e:
         print(f"Paylaşım başarısız: {e}")
