@@ -17,7 +17,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.2 (https://bsky.app/; personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.3 ([https://bsky.app/](https://bsky.app/); personal curation bot)"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
@@ -35,7 +35,7 @@ def save_posted_title(title):
         f.write(f"{title}\n")
 
 def get_unusual_articles():
-    url = "https://en.wikipedia.org/w/api.php"
+    url = "[https://en.wikipedia.org/w/api.php](https://en.wikipedia.org/w/api.php)"
     params = {
         "action": "parse",
         "page": "Wikipedia:Unusual_articles",
@@ -58,7 +58,7 @@ def get_unusual_articles():
 
 def fetch_summary(title):
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
-    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
+    url = f"[https://en.wikipedia.org/api/rest_v1/page/summary/](https://en.wikipedia.org/api/rest_v1/page/summary/){safe_title}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
@@ -104,40 +104,72 @@ def fit_complete_sentences(text, max_len):
     last_space = truncated.rfind(' ')
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
-def request_gemini(prompt):
-    """Birincil sağlayıcı: Google Gemini 2.5 Flash"""
-    if not GEMINI_API_KEY:
+def parse_json_safely(raw_str):
+    """Yapay zekanın ürettiği metinden JSON verisini hatasız ayıklar."""
+    if not raw_str:
         return None
-        
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    # Markdown kod bloklarını temizle
+    clean = re.sub(r'^```(?:json)?\s*', '', raw_str.strip(), flags=re.MULTILINE)
+    clean = re.sub(r'\s*```$', '', clean, flags=re.MULTILINE).strip()
+    try:
+        return json.loads(clean)
+    except Exception:
+        # Metin içindeki ilk { ve son } arasını yakalamayı dene
+        match = re.search(r'\{.*\}', clean, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except Exception:
+                pass
+    return None
+
+def request_gemini(prompt):
+    """1. Öncelik: Gemini 2.5 Flash (Thinking modu kapalı)"""
+    if not GEMINI_API_KEY:
+        print("GEMINI_API_KEY tanımlı değil.")
+        return None
+
+    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "maxOutputTokens": 200,
-            "temperature": 0.8
+            "maxOutputTokens": 800,
+            "temperature": 0.7,
+            "thinkingConfig": {
+                "thinkingBudget": 0  # Token yiyen düşünme modunu kapatır
+            }
         }
     }
-    
+
     try:
-        print("Gemini API çağrılıyor...")
-        resp = requests.post(url, json=payload, timeout=15)
+        print("Gemini 2.5 Flash çağrılıyor...")
+        resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code == 200:
             result = resp.json()
-            raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(raw_text)
-        print(f"Gemini yanıt vermedi (HTTP {resp.status_code}): {resp.text}")
+            candidates = result.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                for part in parts:
+                    if "text" in part and part["text"].strip():
+                        parsed = parse_json_safely(part["text"])
+                        if parsed:
+                            return parsed
+            print(f"Gemini geçerli bir JSON gövdesi döndüremedi: {resp.text[:200]}")
+        else:
+            print(f"Gemini API Hatası (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         print(f"Gemini bağlantı/zaman aşımı hatası: {e}")
+
     return None
 
 def request_groq(prompt):
-    """Yedek sağlayıcı: Groq (Llama 3.3 70B Versatile)"""
+    """2. Öncelik (Yedek): Groq Llama 3.3 70B"""
     if not GROQ_API_KEY:
         print("GROQ_API_KEY tanımlı değil, Groq yedek adımı atlanıyor.")
         return None
 
-    url = "https://api.groq.com/openai/v1/chat/completions"
+    url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -147,7 +179,7 @@ def request_groq(prompt):
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
         "temperature": 0.7,
-        "max_tokens": 200
+        "max_tokens": 400
     }
 
     try:
@@ -155,25 +187,29 @@ def request_groq(prompt):
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             result = resp.json()
-            raw_text = result["choices"][0]["message"]["content"]
-            return json.loads(raw_text)
-        print(f"Groq API hatası (HTTP {resp.status_code}): {resp.text}")
+            content = result["choices"][0]["message"]["content"]
+            parsed = parse_json_safely(content)
+            if parsed:
+                return parsed
+            print(f"Groq JSON parse edilemedi: {content[:200]}")
+        else:
+            print(f"Groq API Hatası (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         print(f"Groq bağlantı hatası: {e}")
+
     return None
 
 def generate_ai_curated_post(title, extract, available_budget):
-    """Gemini ve Groq fallback zinciriyle metin ve emoji üretir."""
     prompt = (
         "You are the curator of a popular Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
         f"Article Title: {title}\n"
         f"Article Background Details: {extract}\n\n"
         "Task:\n"
-        "1. Select ONE single emoji that captures the essence, absurdity, or subject of this story.\n"
+        "1. Select ONE single emoji that captures the core essence, absurdity, or subject of this story.\n"
         "2. Do NOT copy the Wikipedia sentences. Instead, write an ORIGINAL, engaging, and witty 1-2 sentence micro-narrative "
         "explaining WHY this topic is so strange, unbelievable, or hilarious.\n\n"
         "Strict Constraints:\n"
-        f"- The narrative MUST NOT exceed {available_budget} characters.\n"
+        f"- The narrative MUST NOT exceed {available_budget} characters under any circumstance.\n"
         "- Must end with a complete sentence.\n"
         "- Write strictly in English.\n"
         "- Do not start with or repeat the article title.\n"
@@ -182,15 +218,14 @@ def generate_ai_curated_post(title, extract, available_budget):
     )
 
     data = None
-    # 1. Öncelik: Gemini
+    # 1. Deneme: Gemini
     if GEMINI_API_KEY:
         data = request_gemini(prompt)
 
-    # 2. Öncelik (Fallback): Groq
+    # 2. Deneme (Yedek): Groq
     if not data and GROQ_API_KEY:
         data = request_groq(prompt)
 
-    # Başarılı JSON yanıtı kontrolü
     if data:
         emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
         narrative = data.get("narrative", "").strip()
@@ -200,7 +235,7 @@ def generate_ai_curated_post(title, extract, available_budget):
             print(f"Yapay zeka metni başarıyla üretildi ({len(narrative)} kr):\n{narrative}")
             return emoji, narrative
 
-    print("Yapay zeka sağlayıcıları yanıt vermedi, acil durum metin formatına geçiliyor.")
+    print("Yapay zeka sağlayıcıları yanıt vermedi, acil durum ham metin formatına geçiliyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
 def build_post(title, extract, page_url):
@@ -212,9 +247,12 @@ def build_post(title, extract, page_url):
 
     emoji, narrative = generate_ai_curated_post(title, extract, available_narrative_budget)
 
+    # 1. Emoji ve Tıklanabilir Başlık
     builder.text(f"{emoji} ")
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
+
+    # 2. Üretilen Özgün Metin
     builder.text(narrative)
 
     return builder
@@ -274,7 +312,7 @@ def main():
             client.send_image(
                 text=rich_text,
                 image=image_bytes,
-                image_alt=f"{title} konulu Wikipedia arşiv görseli"
+                image_alt=f"{title} Wikipedia görseli"
             )
         else:
             client.send_post(text=rich_text)
