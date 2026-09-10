@@ -10,41 +10,48 @@ from atproto import Client, client_utils
 
 BSKY_HANDLE = os.environ.get("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
-# Wikipedia API standartlarına uygun User-Agent
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/2.3 (https://bsky.app/; personal automation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/2.4 (https://bsky.app/; personal automation bot)"
 }
-
-CONTEXT_EMOJIS = [
-    ("⚔️", ["war", "battle", "military", "army", "soldier", "weapon", "conflict", "siege", "savaş", "asker", "ordu", "silah"]),
-    ("🐾", ["animal", "dog", "cat", "bird", "emu", "mammal", "fish", "insect", "species", "creature", "hayvan", "kuş", "tür"]),
-    ("🚀", ["space", "astronomy", "planet", "orbit", "moon", "star", "satellite", "nasa", "uzay", "gezegen", "yıldız"]),
-    ("🎨", ["art", "painting", "sculpture", "museum", "artist", "exhibition", "sanat", "tablo", "ressam", "heykel"]),
-    ("🎵", ["music", "song", "album", "band", "singer", "opera", "orchestra", "müzik", "şarkı", "albüm"]),
-    ("🕵️", ["crime", "murder", "theft", "hoax", "conspiracy", "mystery", "investigation", "cinayet", "suç", "gizem", "hırsızlık"]),
-    ("🍲", ["food", "dish", "cuisine", "recipe", "beer", "wine", "bread", "cheese", "fruit", "yemek", "mutfak", "içecek"]),
-    ("⚽", ["sport", "football", "match", "player", "olympic", "race", "tournament", "spor", "futbol", "maç", "yarış"]),
-    ("👑", ["king", "queen", "emperor", "monarch", "royal", "empire", "kral", "kraliçe", "imparator", "hanedan"]),
-    ("🧪", ["science", "chemical", "physics", "experiment", "laboratory", "element", "kimya", "fizik", "deney", "laboratuvar"]),
-    ("💀", ["death", "corpse", "cemetery", "grave", "funeral", "skeleton", "ölüm", "mezar", "iskelet"]),
-    ("✈️", ["aircraft", "airplane", "flight", "pilot", "aviation", "crash", "uçak", "havacılık", "uçuş"]),
-    ("🚢", ["ship", "boat", "submarine", "naval", "ocean", "sea", "sailor", "gemi", "denizaltı", "deniz"]),
-    ("🏛️", ["politics", "government", "parliament", "president", "law", "court", "hükümet", "yasa", "mahkeme"]),
-    ("💰", ["money", "currency", "bank", "gold", "economy", "millionaire", "para", "ekonomi", "banka", "altın"]),
-    ("🌍", ["island", "country", "mountain", "river", "volcano", "city", "geography", "ada", "ülke", "dağ", "nehir", "şehir"]),
-    ("👻", ["ghost", "curse", "myth", "monster", "legend", "folklore", "canavar", "efsane", "hayalet", "lanet"]),
-]
 
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨"]
 
-def detect_context_emoji(text):
-    clean_text = text.lower()
-    for emoji, keywords in CONTEXT_EMOJIS:
-        for kw in keywords:
-            if re.search(rf"\b{re.escape(kw)}\b", clean_text):
-                return emoji
+def get_ai_context_emoji(title, extract):
+    """Gemini API kullanarak içerikle en uyumlu tek bir emojiyi belirler."""
+    if not GEMINI_API_KEY:
+        return random.choice(FALLBACK_EMOJIS)
+
+    prompt = (
+        "Given the Wikipedia title and short summary below, return ONLY ONE single emoji "
+        "that best captures the essence, humor, absurdity, or subject of the story. "
+        "Do NOT write any words, explanations, or quotes. Output ONLY the emoji character itself.\n\n"
+        f"Title: {title}\n"
+        f"Summary: {extract[:300]}"
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}]
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            result = resp.json()
+            emoji_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            # Olası boşlukları temizle ve sadece ilk emojiyi al
+            if emoji_text:
+                selected_emoji = emoji_text.split()[0]
+                print(f"Yapay zeka tarafından seçilen emoji: {selected_emoji}")
+                return selected_emoji
+        else:
+            print(f"Gemini API yanıt kodu: {resp.status_code}")
+    except Exception as e:
+        print(f"Yapay zeka emoji seçim hatası: {e}")
+
     return random.choice(FALLBACK_EMOJIS)
 
 def get_posted_titles():
@@ -69,31 +76,25 @@ def get_unusual_articles():
         resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
         data = resp.json()
         links = data.get("parse", {}).get("links", [])
-        
-        # Sadece ana madde uzayındaki (ns: 0) ve var olan sayfaları al
         articles = [
             l["*"] for l in links 
             if l.get("ns") == 0 and "exists" in l and not l["*"].startswith("List of")
         ]
-        print(f"Toplam bulunan sıra dışı madde sayısı: {len(articles)}")
+        print(f"Toplam sıra dışı madde sayısı: {len(articles)}")
         return articles
     except Exception as e:
         print(f"Madde listesi alınırken hata oluştu: {e}")
         return []
 
 def fetch_summary(title):
-    # Özel karakterleri ve boşlukları URL uyumlu hale getir
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
     url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
-    
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
             return resp.json()
-        else:
-            print(f"Atlandı: {title} (HTTP {resp.status_code})")
-    except Exception as e:
-        print(f"Özet çekme hatası ({title}): {e}")
+    except Exception:
+        pass
     return None
 
 def optimize_image(img_bytes):
@@ -135,7 +136,7 @@ def fit_complete_sentences(text, max_len):
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
 def build_post(title, extract, page_url):
-    emoji = detect_context_emoji(f"{title} {extract}")
+    emoji = get_ai_context_emoji(title, extract)
     builder = client_utils.TextBuilder()
 
     builder.text(f"{emoji} ")
@@ -159,16 +160,13 @@ def main():
     candidates = get_unusual_articles()
     
     if not candidates:
-        print("Aday listesi boş geldi.")
+        print("Aday listesi boş.")
         return
 
     unposted = [c for c in candidates if c not in posted]
-    print(f"Daha önce paylaşılmamış madde sayısı: {len(unposted)}")
-    
     random.shuffle(unposted)
 
     target_data = None
-    # Kota 50'ye çıkarıldı: Uygun madde bulunana kadar dener
     for cand in unposted[:50]:
         data = fetch_summary(cand)
         if data and data.get("type") == "standard" and data.get("extract"):
@@ -177,7 +175,7 @@ def main():
             break
 
     if not target_data:
-        print("50 aday tarandı ancak uygun içerik bulunamadı.")
+        print("Uygun içerik bulunamadı.")
         return
 
     title = target_data.get("title")
@@ -213,7 +211,7 @@ def main():
         else:
             client.send_post(text=rich_text)
 
-        print(f"Bluesky'a başarıyla paylaşıldı: {title}")
+        print(f"Başarıyla paylaşıldı: {title}")
         save_posted_title(title)
     except Exception as e:
         print(f"Paylaşım başarısız: {e}")
