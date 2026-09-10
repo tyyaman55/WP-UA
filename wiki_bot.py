@@ -17,7 +17,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.5 (https://bsky.app/; personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.7 (https://bsky.app/; personal curation bot)"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
@@ -25,7 +25,6 @@ MAX_BLOB_IMAGE_SIZE = 950_000
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
 
 def clean_url(raw_url):
-    """Tarayıcı veya GitHub editörünün oluşturduğu [link](link) markdown kalıntılarını temizler."""
     if not raw_url:
         return raw_url
     match = re.search(r'https?://[^\s)\]"\']+', str(raw_url))
@@ -137,7 +136,7 @@ def request_gemini(prompt):
         "generationConfig": {
             "response_mime_type": "application/json",
             "maxOutputTokens": 800,
-            "temperature": 0.7,
+            "temperature": 0.75,
             "thinkingConfig": {
                 "thinkingBudget": 0
             }
@@ -179,7 +178,7 @@ def request_groq(prompt):
         "model": "llama-3.3-70b-versatile",
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
-        "temperature": 0.7,
+        "temperature": 0.75,
         "max_tokens": 400
     }
 
@@ -201,20 +200,23 @@ def request_groq(prompt):
     return None
 
 def generate_ai_curated_post(title, extract, available_budget):
+    # Kalan tüm alanı zorlamak için alt sınırı bütçenin sadece 15-20 karakter gerisine koyuyoruz
+    target_min = max(200, available_budget - 20)
+
     prompt = (
-        "You are the curator of a popular Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
+        "You are the curator of a top Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
         f"Article Title: {title}\n"
         f"Article Background Details: {extract}\n\n"
         "Task:\n"
-        "1. Select ONE single emoji that captures the core essence, absurdity, or subject of this story.\n"
-        "2. Do NOT copy the Wikipedia sentences. Instead, write an ORIGINAL, engaging, and witty 1-2 sentence micro-narrative "
-        "explaining WHY this topic is so strange, unbelievable, or hilarious.\n\n"
-        "Strict Constraints:\n"
-        f"- The narrative MUST NOT exceed {available_budget} characters under any circumstance.\n"
-        "- Must end with a complete sentence.\n"
-        "- Write strictly in English.\n"
+        "1. Select ONE single emoji capturing the core absurdity of this subject.\n"
+        "2. Write a highly engaging, richly detailed, and witty narrative explaining WHY this topic is so strange or incredible.\n\n"
+        "CRITICAL CHARACTER BUDGET REQUIREMENTS (DO NOT IGNORE):\n"
+        f"- Target Length: You MUST write between {target_min} and {available_budget} characters. Do NOT write brief summaries.\n"
+        f"- Absolute Maximum: Under NO circumstances exceed {available_budget} characters (hard platform cutoff).\n"
+        "- Sentence Structure: You must end with a full, grammatically complete sentence (ending with . ! or ?).\n"
+        "- Language: English.\n"
         "- Do not start with or repeat the article title.\n"
-        "- Do not include hashtags or URLs.\n"
+        "- Do not include hashtags, markdown bolding, or links.\n"
         "- Output strictly valid JSON format with keys: \"emoji\" and \"narrative\"."
     )
 
@@ -231,25 +233,35 @@ def generate_ai_curated_post(title, extract, available_budget):
         if narrative:
             if len(narrative) > available_budget:
                 narrative = fit_complete_sentences(narrative, available_budget)
-            print(f"Yapay zeka metni başarıyla üretildi ({len(narrative)} kr):\n{narrative}")
             return emoji, narrative
 
-    print("Yapay zeka sağlayıcıları yanıt vermedi, acil durum ham metin formatına geçiliyor.")
+    print("Yapay zeka yanıt vermedi, acil durum ham metin formatına geçiliyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
 def build_post(title, extract, page_url):
     builder = client_utils.TextBuilder()
 
-    header_text_without_emoji = f" {title.upper()}\n\n"
-    header_cost = 2 + len(header_text_without_emoji)
-    available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_cost - 3
+    # Başlık metninin uzunluğunu tam olarak hesapla
+    # Standart format: "{emoji} {TITLE}\n\n"
+    # Emoji ~2 karakter, boşluk 1 karakter, \n\n 2 karakter = len(title) + 5
+    header_len_approx = len(title) + 5
+    
+    # 300 sınırdan başlığı ve 2 karakterlik güvenlik marjını düşüyoruz
+    available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_len_approx - 2
 
     emoji, narrative = generate_ai_curated_post(title, extract, available_narrative_budget)
 
+    # 1. Başlık ve Tıklanabilir Link
     builder.text(f"{emoji} ")
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
+
+    # 2. Üretilen Yoğun Metin
     builder.text(narrative)
+
+    # Toplam gönderi uzunluğunu kontrol et
+    total_post_len = len(f"{emoji} {title.upper()}\n\n{narrative}")
+    print(f"Toplam Gönderi Hacmi: {total_post_len} / 300 grafem (Özet: {len(narrative)} kr)")
 
     return builder
 
