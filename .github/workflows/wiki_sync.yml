@@ -2,6 +2,7 @@ name: Wikipedia Bot to Bluesky
 
 on:
   schedule:
+    # TSİ 09:00 = UTC 06:00
     - cron: '0 6 * * *'
   workflow_dispatch:
 
@@ -14,6 +15,8 @@ jobs:
     steps:
       - name: Depoyu Klonla
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Rebase çakışmalarını önlemek için tüm geçmişi çeker
 
       - name: Python Ortamını Kur
         uses: actions/setup-python@v5
@@ -38,7 +41,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add posted_articles.txt
           if ! git diff --staged --quiet; then
-            git commit -m "chore: update posted wiki archive"
+            git commit -m "chore: update posted wiki archive [skip ci]"
             git pull --rebase origin main
-            git push
+            git push origin main
           fi
