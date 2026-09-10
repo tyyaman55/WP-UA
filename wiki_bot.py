@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import re
+import json
 import urllib.parse
 import requests
 from io import BytesIO
@@ -14,44 +15,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/2.4 (https://bsky.app/; personal automation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.0 (https://bsky.app/; personal curation bot)"
 }
 
-FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨"]
-
-def get_ai_context_emoji(title, extract):
-    """Gemini 2.5 Flash kullanarak içerikle en uyumlu tek bir emojiyi belirler."""
-    if not GEMINI_API_KEY:
-        return random.choice(FALLBACK_EMOJIS)
-
-    prompt = (
-        "Given the Wikipedia title and short summary below, return ONLY ONE single emoji "
-        "that best captures the essence, humor, absurdity, or subject of the story. "
-        "Do NOT write any words, explanations, or quotes. Output ONLY the emoji character itself.\n\n"
-        f"Title: {title}\n"
-        f"Summary: {extract[:300]}"
-    )
-
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        if resp.status_code == 200:
-            result = resp.json()
-            emoji_text = result["candidates"][0]["content"]["parts"][0]["text"].strip()
-            if emoji_text:
-                selected_emoji = emoji_text.split()[0]
-                print(f"Yapay zeka (gemini-2.5-flash) tarafından seçilen emoji: {selected_emoji}")
-                return selected_emoji
-        else:
-            print(f"Gemini API yanıt kodu ({resp.status_code}): {resp.text}")
-    except Exception as e:
-        print(f"Yapay zeka emoji seçim hatası: {e}")
-
-    return random.choice(FALLBACK_EMOJIS)
+TOTAL_BLUESKY_BUDGET = 300
+MAX_BLOB_IMAGE_SIZE = 950_000
+FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
 
 def get_posted_titles():
     if os.path.exists(STATE_FILE):
@@ -82,7 +51,7 @@ def get_unusual_articles():
         print(f"Toplam sıra dışı madde sayısı: {len(articles)}")
         return articles
     except Exception as e:
-        print(f"Madde listesi alınırken hata oluştu: {e}")
+        print(f"Madde listesi çekilirken hata: {e}")
         return []
 
 def fetch_summary(title):
@@ -119,7 +88,6 @@ def fit_complete_sentences(text, max_len):
         if not s:
             continue
         added_len = len(s) if not collected else len(s) + 1
-        
         if current_len + added_len <= max_len:
             collected.append(s)
             current_len += added_len
@@ -134,25 +102,85 @@ def fit_complete_sentences(text, max_len):
     last_space = truncated.rfind(' ')
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
+def generate_ai_curated_post(title, extract, available_budget):
+    """
+    Gemini 2.5 Flash ile konunun neden tuhaf olduğunu anlatan
+    kalan bütçeye tam oturan mikro bir metin ve tek bir emoji üretir.
+    """
+    if not GEMINI_API_KEY:
+        return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
+
+    prompt = (
+        "You are the curator of a popular Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
+        f"Article Title: {title}\n"
+        f"Article Summary: {extract}\n\n"
+        "Task:\n"
+        "1. Select ONE single emoji that captures the core essence, absurdity, or subject of this story.\n"
+        "2. Write an engaging, curiosity-sparking 1-2 sentence micro-narrative explaining WHY this topic is so strange or remarkable.\n\n"
+        "Strict Constraints:\n"
+        f"- The narrative MUST NOT exceed {available_budget} characters under any circumstance.\n"
+        "- Must end with a complete sentence (never truncate or cut off mid-thought).\n"
+        "- The text must be in English.\n"
+        "- Do not repeat or mention the article title at the start.\n"
+        "- Do not include links or hashtags.\n"
+        "- Output strictly valid JSON with two keys: \"emoji\" and \"narrative\"."
+    )
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json"
+        }
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code == 200:
+            result = resp.json()
+            raw_text = result["candidates"][0]["content"]["parts"][0]["text"]
+            data = json.loads(raw_text)
+            
+            emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
+            narrative = data.get("narrative", "").strip()
+            
+            # Uzunluk garantisi kontrolü
+            if len(narrative) > available_budget:
+                narrative = fit_complete_sentences(narrative, available_budget)
+                
+            print(f"Yapay Zeka Metni ({len(narrative)} kr): {narrative}")
+            return emoji, narrative
+        else:
+            print(f"Gemini API Hatası ({resp.status_code}): {resp.text}")
+    except Exception as e:
+        print(f"Yapay zeka üretim hatası: {e}")
+
+    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
+
 def build_post(title, extract, page_url):
-    emoji = get_ai_context_emoji(title, extract)
     builder = client_utils.TextBuilder()
 
+    # Başlık alanı: emoji (2) + boşluk (1) + başlık + 2x newline (2)
+    header_text_without_emoji = f" {title.upper()}\n\n"
+    # Bluesky'ın 300 grafem sınırından başlık ve 3 karakterlik güvenlik payını düş
+    header_cost = 2 + len(header_text_without_emoji)
+    available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_cost - 3
+
+    emoji, narrative = generate_ai_curated_post(title, extract, available_narrative_budget)
+
+    # 1. Emoji ve Tıklanabilir Başlık
     builder.text(f"{emoji} ")
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
 
-    header_len = 2 + len(title) + 2
-    available_budget = 295 - header_len
-    
-    body = fit_complete_sentences(extract, available_budget)
-    builder.text(body)
+    # 2. Üretilen Anlatı
+    builder.text(narrative)
 
     return builder
 
 def main():
     if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
-        print("Kimlik bilgileri eksik.")
+        print("Bluesky kimlik değişkenleri eksik.")
         sys.exit(1)
 
     posted = get_posted_titles()
@@ -174,7 +202,7 @@ def main():
             break
 
     if not target_data:
-        print("Uygun içerik bulunamadı.")
+        print("50 aday tarandı ancak uygun içerik bulunamadı.")
         return
 
     title = target_data.get("title")
@@ -205,7 +233,7 @@ def main():
             client.send_image(
                 text=rich_text,
                 image=image_bytes,
-                image_alt=f"{title} Wikipedia görseli"
+                image_alt=f"{title} konulu Wikipedia arşiv görseli"
             )
         else:
             client.send_post(text=rich_text)
@@ -213,7 +241,7 @@ def main():
         print(f"Başarıyla paylaşıldı: {title}")
         save_posted_title(title)
     except Exception as e:
-        print(f"Paylaşım başarısız: {e}")
+        print(f"Bluesky paylaşım hatası: {e}")
 
 if __name__ == "__main__":
     main()
