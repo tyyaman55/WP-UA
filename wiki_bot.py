@@ -17,7 +17,7 @@ GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.3 ([https://bsky.app/](https://bsky.app/); personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/3.4 (https://bsky.app/; personal curation bot)"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
@@ -35,7 +35,7 @@ def save_posted_title(title):
         f.write(f"{title}\n")
 
 def get_unusual_articles():
-    url = "[https://en.wikipedia.org/w/api.php](https://en.wikipedia.org/w/api.php)"
+    url = "https://en.wikipedia.org/w/api.php"
     params = {
         "action": "parse",
         "page": "Wikipedia:Unusual_articles",
@@ -58,7 +58,7 @@ def get_unusual_articles():
 
 def fetch_summary(title):
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
-    url = f"[https://en.wikipedia.org/api/rest_v1/page/summary/](https://en.wikipedia.org/api/rest_v1/page/summary/){safe_title}"
+    url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
@@ -105,16 +105,13 @@ def fit_complete_sentences(text, max_len):
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
 def parse_json_safely(raw_str):
-    """Yapay zekanın ürettiği metinden JSON verisini hatasız ayıklar."""
     if not raw_str:
         return None
-    # Markdown kod bloklarını temizle
     clean = re.sub(r'^```(?:json)?\s*', '', raw_str.strip(), flags=re.MULTILINE)
     clean = re.sub(r'\s*```$', '', clean, flags=re.MULTILINE).strip()
     try:
         return json.loads(clean)
     except Exception:
-        # Metin içindeki ilk { ve son } arasını yakalamayı dene
         match = re.search(r'\{.*\}', clean, re.DOTALL)
         if match:
             try:
@@ -124,12 +121,10 @@ def parse_json_safely(raw_str):
     return None
 
 def request_gemini(prompt):
-    """1. Öncelik: Gemini 2.5 Flash (Thinking modu kapalı)"""
     if not GEMINI_API_KEY:
-        print("GEMINI_API_KEY tanımlı değil.")
         return None
 
-    url = f"[https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=](https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=){GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -137,7 +132,7 @@ def request_gemini(prompt):
             "maxOutputTokens": 800,
             "temperature": 0.7,
             "thinkingConfig": {
-                "thinkingBudget": 0  # Token yiyen düşünme modunu kapatır
+                "thinkingBudget": 0
             }
         }
     }
@@ -155,21 +150,20 @@ def request_gemini(prompt):
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-            print(f"Gemini geçerli bir JSON gövdesi döndüremedi: {resp.text[:200]}")
+            print(f"Gemini geçerli bir JSON döndürmedi: {resp.text[:200]}")
         else:
             print(f"Gemini API Hatası (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
-        print(f"Gemini bağlantı/zaman aşımı hatası: {e}")
+        print(f"Gemini bağlantı hatası: {e}")
 
     return None
 
 def request_groq(prompt):
-    """2. Öncelik (Yedek): Groq Llama 3.3 70B"""
     if not GROQ_API_KEY:
         print("GROQ_API_KEY tanımlı değil, Groq yedek adımı atlanıyor.")
         return None
 
-    url = "[https://api.groq.com/openai/v1/chat/completions](https://api.groq.com/openai/v1/chat/completions)"
+    url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
@@ -218,11 +212,9 @@ def generate_ai_curated_post(title, extract, available_budget):
     )
 
     data = None
-    # 1. Deneme: Gemini
     if GEMINI_API_KEY:
         data = request_gemini(prompt)
 
-    # 2. Deneme (Yedek): Groq
     if not data and GROQ_API_KEY:
         data = request_groq(prompt)
 
@@ -247,12 +239,9 @@ def build_post(title, extract, page_url):
 
     emoji, narrative = generate_ai_curated_post(title, extract, available_narrative_budget)
 
-    # 1. Emoji ve Tıklanabilir Başlık
     builder.text(f"{emoji} ")
     builder.link(title.upper(), page_url)
     builder.text("\n\n")
-
-    # 2. Üretilen Özgün Metin
     builder.text(narrative)
 
     return builder
