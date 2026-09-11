@@ -2,7 +2,7 @@ name: Wikipedia Bot to Bluesky
 
 on:
   schedule:
-    - cron: '44 17 * * *'
+    - cron: '53 17 * * *'
   workflow_dispatch:
 
 concurrency:
