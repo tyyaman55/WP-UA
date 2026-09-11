@@ -12,8 +12,14 @@ from io import BytesIO
 from PIL import Image
 from atproto import Client, client_utils
 
-BSKY_HANDLE = os.environ.get("BSKY_HANDLE")
-BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
+# İngilizce Hesap (Birincil)
+BSKY_HANDLE_EN = os.environ.get("BSKY_HANDLE_EN") or os.environ.get("BSKY_HANDLE")
+BSKY_APP_PASSWORD_EN = os.environ.get("BSKY_APP_PASSWORD_EN") or os.environ.get("BSKY_APP_PASSWORD")
+
+# Türkçe Hesap (İkincil)
+BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
+BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
@@ -22,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/4.2 (https://bsky.app/; curated unusual articles bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.0 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -116,7 +122,7 @@ def save_posted_title(record_key, max_retries=5):
 
         put_resp = requests.put(url, headers=GITHUB_API_HEADERS, json=payload, timeout=15)
         if put_resp.status_code in (200, 201):
-            print(f"'{record_key}' başarıyla kaydedildi.")
+            print(f"'{record_key}' başarıyla arşive işlendi.")
             return
         elif put_resp.status_code in (409, 422):
             time.sleep(1.5)
@@ -301,7 +307,7 @@ def request_gemini(prompt):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "maxOutputTokens": 800,
+            "maxOutputTokens": 1200,
             "temperature": 0.85,
             "thinkingConfig": {
                 "thinkingBudget": 0
@@ -344,7 +350,7 @@ def request_groq(prompt):
         ],
         "temperature": 0.8,
         "reasoning_effort": "none",
-        "max_tokens": 900
+        "max_tokens": 1200
     }
 
     try:
@@ -358,92 +364,75 @@ def request_groq(prompt):
         print(f"Groq bağlantı hatası: {e}")
     return None
 
-def generate_ai_curated_post(cand, extract, available_budget):
-    # Modelin metni kısa kesmesini engellemek için agresif alt limit
-    target_min = max(200, available_budget - 25)
+def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
+    """Tek bir AI çağrısıyla hem İngilizce hem Türkçe dolgun ve merak uyandırıcı metin üretir."""
+    target_min_en = max(200, budget_en - 25)
+    target_min_tr = max(200, budget_tr - 25)
 
     base_prompt = (
-        "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
+        "You curate twin Bluesky accounts (one in English, one in Turkish) dedicated to reality's strangest oddities.\n"
         f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
         f"Article Title: {cand['title']}\n"
         f"Curator Note (WHY IT IS UNUSUAL): {cand['curation_note']}\n"
         f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
-        "GOAL:\n"
-        "Craft a compelling 2 to 3-sentence micro-narrative in ENGLISH that hooks the reader with the sheer bizarre irony of this story.\n\n"
-        "TONE & STYLE (CRITICAL):\n"
-        "- Write with an intriguing, curious narrative voice with a subtle touch of dry, intelligent mischief (playful curiosity without being disrespectful or silly).\n"
-        "- Do NOT write a dry textbook summary. Avoid formal encyclopedic passive phrasing (e.g. 'It is known as...', 'This article describes...').\n"
-        "- Focus on the concrete paradox: the specific odd rule, historical accident, absurd number, or improbable turn of events.\n"
-        "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n\n"
-        "LENGTH REQUIREMENTS (STRICT):\n"
-        f"- Target Range: MUST be between {target_min} and {available_budget} characters. Do NOT stop early at 150-180 characters. Fill the available budget with vivid details!\n"
-        f"- Hard Limit: Under NO condition exceed {available_budget} characters.\n"
-        "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
-        "- Do not repeat or start with the article title.\n"
-        "- No hashtags, no markdown formatting.\n"
-        "- Select ONE matching emoji.\n"
-        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative\": \"...\"}."
+        "TASKS:\n"
+        "1. Select ONE single emoji matching the topic.\n"
+        "2. Write an English narrative ('narrative_en') focusing on the bizarre paradox, odd law, or funny accident.\n"
+        "3. Write a Turkish narrative ('narrative_tr') about the same core fact. It must be written directly in native, natural, captivating Turkish (NOT a clunky word-for-word translation).\n\n"
+        "TONE & STYLE GUIDELINES (FOR BOTH LANGUAGES):\n"
+        "- Hook the reader with genuine curiosity and a subtle touch of intelligent, dry mischief (hafif muzip, zekice, merak uyandırıcı).\n"
+        "- Laubali/saygısız olmadan, ama asla resmi ders kitabı veya kuru ansiklopedi monotonluğuna girmeden anlatın.\n"
+        "- Do NOT use cheap stock hooks ('Imagine this', 'Picture this', 'Meet the', 'Düşünün ki', 'İnanamayacaksınız'). Dive directly into the unusual reality.\n\n"
+        "LENGTH CONSTRAINTS (CRITICAL - FILL THE BUDGET):\n"
+        f"- narrative_en: MUST be between {target_min_en} and {budget_en} characters.\n"
+        f"- narrative_tr: MUST be between {target_min_tr} and {budget_tr} characters.\n"
+        "- Both narratives MUST end with complete, finished punctuation (. ! ?).\n"
+        "- Never repeat or begin with the article title. No hashtags, no markdown.\n"
+        "- Respond with strictly valid JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\"}."
     )
 
-    # En fazla 3 deneme: Metin kısa kesilirse döngüye girip tekrar zorlar
     for attempt in range(1, 4):
-        current_prompt = base_prompt
+        prompt = base_prompt
         if attempt > 1:
-            current_prompt += (
-                f"\n\nCRITICAL RETRY NOTICE: Your previous output was way too short! "
-                f"You MUST expand your narrative with more vivid historical or situational context to reach between {target_min} and {available_budget} characters."
-            )
+            prompt += "\n\nCRITICAL RETRY NOTICE: One or both narratives were too short! Expand with rich paradoxes and concrete details to meet the character budgets."
 
         data = None
         if GEMINI_API_KEY:
-            data = request_gemini(current_prompt)
+            data = request_gemini(prompt)
         if not data and GROQ_API_KEY:
-            data = request_groq(current_prompt)
+            data = request_groq(prompt)
 
         if data:
             emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
-            narrative = data.get("narrative", "").strip()
+            n_en = data.get("narrative_en", "").strip()
+            n_tr = data.get("narrative_tr", "").strip()
 
-            if narrative:
-                # Bütçeyi aştıysa tam cümle hizala
-                if len(narrative) > available_budget:
-                    narrative = fit_complete_sentences(narrative, available_budget)
+            if n_en and n_tr:
+                if len(n_en) > budget_en:
+                    n_en = fit_complete_sentences(n_en, budget_en)
+                if len(n_tr) > budget_tr:
+                    n_tr = fit_complete_sentences(n_tr, budget_tr)
 
-                # Karakter kontrolü: Yeterli dolgunluktaysa veya son denemedeyse kabul et
-                if len(narrative) >= target_min or attempt == 3:
-                    print(f"Yapay zeka metni kabul edildi ({len(narrative)} / {available_budget} kr, Deneme {attempt}):\n{narrative}")
-                    return emoji, narrative
+                if (len(n_en) >= target_min_en and len(n_tr) >= target_min_tr) or attempt == 3:
+                    print(f"Yapay zeka metinleri onaylandı (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr, Deneme {attempt})")
+                    return emoji, n_en, n_tr
 
-                print(f"Metin kısa kaldı ({len(narrative)} kr < hedef {target_min} kr). Yeniden deneniyor ({attempt}/3)...")
+                print(f"Metinler bütçeyi doldurmadı (EN: {len(n_en)}, TR: {len(n_tr)}). Yeniden deneniyor ({attempt}/3)...")
 
-    print("Yapay zeka yanıt vermedi veya yetersiz kaldı, acil durum metnine geçiliyor.")
-    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
+    print("Yapay zeka yanıt vermedi, acil durum metinlerine dönülüyor.")
+    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), fit_complete_sentences(extract, budget_tr)
 
-def build_post(cand, extract, page_url):
+def build_post(cand, narrative, emoji, page_url):
     builder = client_utils.TextBuilder()
-
-    header_text_without_emoji = f" {cand['title'].upper()}\n\n"
-    header_cost = 2 + len(header_text_without_emoji)
-    available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_cost - 2
-
-    emoji, narrative = generate_ai_curated_post(cand, extract, available_narrative_budget)
-
-    # 1. Emoji ve Başlık
     builder.text(f"{emoji} ")
     builder.link(cand['title'].upper(), page_url)
     builder.text("\n\n")
-
-    # 2. Üretilen Dolgun Metin
     builder.text(narrative)
-
-    total_post_len = len(f"{emoji} {cand['title'].upper()}\n\n{narrative}")
-    print(f"Toplam Gönderi Hacmi: {total_post_len} / 300 grafem (Özet: {len(narrative)} kr)")
-
     return builder
 
 def main():
-    if not BSKY_HANDLE or not BSKY_APP_PASSWORD:
-        print("Bluesky kimlik değişkenleri eksik.")
+    if not BSKY_HANDLE_EN or not BSKY_APP_PASSWORD_EN:
+        print("İngilizce Bluesky hesap bilgileri eksik.")
         sys.exit(1)
 
     posted = get_posted_titles()
@@ -456,7 +445,7 @@ def main():
     target_data = None
 
     # 1. ÖNCELİK: ENWIKI
-    print("Öncelik kontrolü: ENWIKI maddeleri taranıyor...")
+    print("Öncelik kontrolü: ENWIKI taranıyor...")
     en_candidates = extract_candidates_from_source(en_source)
     en_unposted = [c for c in en_candidates if not is_already_posted(c, posted_lower)]
     print(f"[en.wikipedia.org] Henüz paylaşılmamış ENWIKI aday sayısı: {len(en_unposted)}")
@@ -469,22 +458,15 @@ def main():
                 chosen_candidate = cand
                 target_data = data
                 print(f"ENWIKI'den Seçilen Madde: {cand['title']}")
-                print(f"Küratör Notu: {cand['curation_note'][:120]}...")
                 break
 
     # 2. ÖNCELİK: ENWIKI BİTERSE DİĞERLERİ
     if not chosen_candidate:
-        if not en_unposted:
-            print("ENWIKI sıra dışı maddeleri tükendi! Diğer diller (DE, ES, FR) rastgele taranıyor...")
-        else:
-            print("ENWIKI adaylarından veri alınamadı, yedek dillere geçiliyor...")
-
+        print("ENWIKI tükendi veya erişilemedi, diğer diller rastgele taranıyor...")
         random.shuffle(other_sources)
         for src in other_sources:
             candidates = extract_candidates_from_source(src)
             unposted = [c for c in candidates if not is_already_posted(c, posted_lower)]
-            print(f"[{src['domain']}] Henüz paylaşılmamış aday sayısı: {len(unposted)}")
-
             random.shuffle(unposted)
             for cand in unposted[:40]:
                 data = fetch_summary(cand["domain"], cand["title"])
@@ -492,14 +474,12 @@ def main():
                     chosen_candidate = cand
                     target_data = data
                     print(f"Yedek Dilden Seçilen Madde: {cand['title']} ({cand['domain']})")
-                    print(f"Küratör Notu: {cand['curation_note'][:120]}...")
                     break
-
             if chosen_candidate:
                 break
 
     if not chosen_candidate or not target_data:
-        print("Uygun içerikli sıra dışı madde bulunamadı.")
+        print("Uygun sıra dışı madde bulunamadı.")
         return
 
     title = chosen_candidate["title"]
@@ -507,22 +487,21 @@ def main():
     extract = target_data.get("extract", "").strip()
     page_url = target_data.get("content_urls", {}).get("desktop", {}).get("page", "")
 
+    # Görsel Hazırlığı
     img_url = (
         target_data.get("originalimage", {}).get("source") or 
         target_data.get("thumbnail", {}).get("source")
     )
-
     image_bytes = None
-    alt_text = f"{title} Wikipedia image"
+    alt_text_en = f"{title} Wikipedia image"
+    alt_text_tr = f"{title} Vikipedi görseli"
 
     if img_url:
         try:
             caption = fetch_image_caption(domain, title, img_url)
             if caption:
-                alt_text = f"{title}: {caption}"
-                if len(alt_text) > 500:
-                    alt_text = alt_text[:497] + "..."
-            print(f"Görsel Alt Metni: {alt_text}")
+                alt_text_en = f"{title}: {caption}"[:495]
+                alt_text_tr = f"{title}: {caption}"[:495]
 
             r = requests.get(clean_url(img_url), headers=HEADERS, timeout=20)
             if r.status_code == 200:
@@ -530,25 +509,47 @@ def main():
         except Exception as e:
             print(f"Görsel indirilemedi: {e}")
 
-    client = Client()
-    client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
+    # Bütçe Hesaplama
+    header_len = len(title) + 5
+    available_budget = TOTAL_BLUESKY_BUDGET - header_len - 2
 
-    rich_text = build_post(chosen_candidate, extract, page_url)
+    # Metin Üretimi (Tek Seferde İki Dil)
+    emoji, narrative_en, narrative_tr = generate_dual_language_posts(
+        chosen_candidate, extract, available_budget, available_budget
+    )
 
+    post_en = build_post(chosen_candidate, narrative_en, emoji, page_url)
+    post_tr = build_post(chosen_candidate, narrative_tr, emoji, page_url)
+
+    # 1. HESAP: İNGİLİZCE PAYLAŞIM
     try:
+        client_en = Client()
+        client_en.login(BSKY_HANDLE_EN, BSKY_APP_PASSWORD_EN)
         if image_bytes:
-            client.send_image(
-                text=rich_text,
-                image=image_bytes,
-                image_alt=alt_text
-            )
+            client_en.send_image(text=post_en, image=image_bytes, image_alt=alt_text_en)
         else:
-            client.send_post(text=rich_text)
-
-        print(f"Başarıyla paylaşıldı: {title}")
-        save_posted_title(f"{chosen_candidate['lang']}:{title}")
+            client_en.send_post(text=post_en)
+        print(f"[EN Hesap] Başarıyla paylaşıldı: {title}")
     except Exception as e:
-        print(f"Bluesky paylaşım hatası: {e}")
+        print(f"[EN Hesap] Paylaşım hatası: {e}")
+
+    # 2. HESAP: TÜRKÇE PAYLAŞIM (Eğer tanımlıysa)
+    if BSKY_HANDLE_TR and BSKY_APP_PASSWORD_TR:
+        try:
+            client_tr = Client()
+            client_tr.login(BSKY_HANDLE_TR, BSKY_APP_PASSWORD_TR)
+            if image_bytes:
+                client_tr.send_image(text=post_tr, image=image_bytes, image_alt=alt_text_tr)
+            else:
+                client_tr.send_post(text=post_tr)
+            print(f"[TR Hesap] Başarıyla paylaşıldı: {title}")
+        except Exception as e:
+            print(f"[TR Hesap] Paylaşım hatası: {e}")
+    else:
+        print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
+
+    # Ortak Arşiv Kaydı
+    save_posted_title(f"{chosen_candidate['lang']}:{title}")
 
 if __name__ == "__main__":
     main()
