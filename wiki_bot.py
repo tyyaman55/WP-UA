@@ -299,7 +299,7 @@ def request_groq(prompt):
         ],
         "temperature": 0.75,
         "reasoning_effort": "none",
-        "max_tokens": 1500
+        "max_tokens": 900
     }
 
     try:
