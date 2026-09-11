@@ -290,11 +290,16 @@ def request_groq(prompt):
     }
     payload = {
         "model": "openai/gpt-oss-120b",
-        "messages": [{"role": "user", "content": prompt}],
-        "response_format": {"type": "json_object"},
+        "messages": [
+            {
+                "role": "system",
+                "content": "You always respond with a single valid JSON object and nothing else — no markdown fences, no commentary before or after it."
+            },
+            {"role": "user", "content": prompt}
+        ],
         "temperature": 0.75,
         "reasoning_effort": "low",
-        "max_tokens": 1024
+        "max_tokens": 1500
     }
 
     try:
