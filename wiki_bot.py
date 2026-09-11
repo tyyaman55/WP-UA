@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.7 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.8 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -151,11 +151,6 @@ def extract_candidates_from_source(source):
 
         html_text = resp.json().get("parse", {}).get("text", {}).get("*", "")
 
-        # NOT: Bu sayfaların çoğu artık düz <li> madde listesi değil, wikitable
-        # (<tr><td>...) satırları olarak biçimlendiriliyor (bölge/ülke | madde | not
-        # şeklinde 3 sütun). Sadece <li> aranırsa maddelerin büyük çoğunluğu (yüzlerce)
-        # atlanır ve sadece hâlâ düz liste olan birkaç bölümden (~20 madde) sonuç gelir.
-        # Bu yüzden hem <li> hem <tr> blokları aynı anda yakalanıyor.
         blocks = re.findall(r'<(?P<tag>li|tr)\b[^>]*>(?P<content>.*?)</(?P=tag)>', html_text, flags=re.DOTALL | re.IGNORECASE)
 
         skip_prefixes = (
@@ -168,10 +163,6 @@ def extract_candidates_from_source(source):
         )
 
         def pick_title(block_html):
-            # Tablo satırlarında ilk hücre genelde bölge/ülke adı (ör. "Illinois"),
-            # asıl ilginç madde ise Vikipedi kuralı gereği KALIN (<b>) yazılan link
-            # olur (ör. "'''[[Bubbly Creek]]'''"). Bu yüzden önce kalın linki dene;
-            # bulunamazsa (düz <li> listelerinde olduğu gibi) ilk uygun linke düş.
             bold_match = re.search(
                 r'<b>\s*<a\s+[^>]*href=["\']/wiki/([^"#?:]+)["\'][^>]*>(.*?)</a>\s*</b>',
                 block_html, flags=re.DOTALL | re.IGNORECASE
@@ -208,8 +199,6 @@ def extract_candidates_from_source(source):
             if len(clean_note) < 25:
                 continue
 
-            # <tr> bazen iç içe başka bloklarla (ör. iç tablo/resim) çakışıp aynı
-            # maddeyi birden fazla üretebilir; başlığa göre yinelenenleri ele.
             dedup_key = target_title.lower()
             if dedup_key in seen_titles:
                 continue
@@ -389,13 +378,6 @@ def request_gemini(prompt):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            # Gemini 3.x'te "thinking" token'ları da maxOutputTokens bütçesinden
-            # düşülüyor. "low" seviyesinde bile bir kısım tokenı iç muhakemeye
-            # gidip asıl JSON cevabını yarıda (kapanmamış parantezle) kesiyordu
-            # - "beklenen JSON formatı çözülemedi" hatasının asıl sebebi buydu.
-            # Bu basit, yapılandırılmış çıktı görevi derin muhakeme gerektirmediği
-            # için "minimal" (eski thinkingBudget:0'a en yakın karşılık) kullanılıyor,
-            # ayrıca payı da yükselttik.
             "maxOutputTokens": 2048,
             "temperature": 0.85,
             "thinkingConfig": {
@@ -417,9 +399,6 @@ def request_gemini(prompt):
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-                # Buraya geldiyse JSON çözülemedi: teşhis için sebebi ve ham metnin
-                # bir kısmını yazdır (ör. finishReason=MAX_TOKENS demek, yanıt
-                # bütçe/limit yüzünden yarıda kesildi demektir).
                 raw_preview = " ".join(p.get("text", "") for p in parts)[:300]
                 print(f"[Gemini] Yanıt alındı ancak beklenen JSON formatı çözülemedi. (finishReason={finish_reason or 'bilinmiyor'})")
                 if raw_preview:
@@ -471,58 +450,53 @@ def request_groq(prompt):
     return None
 
 def validate_candidate_output(data, budget_en, budget_tr, min_en, min_tr):
-    """Çıktıyı dil/noktalama kurallarına göre değerlendirir; bütçeyi aşan metni kırpar.
-
-    Eskiden "hedefin son 25 karakterine kadar yaklaşmadıysa reddet" gibi çok dar
-    bir eşik vardı ve bu, LLM çıktısındaki doğal uzunluk oynaklığıyla sürekli
-    çakışıp geçerli, iyi yazılmış metinleri bile "Bütçe yetersiz" diye eliyordu.
-    Artık tek gerçek ret sebepleri: metin boş, Türkçe değil, ya da aşırı
-    noktalamalı. Uzunluğu bütçeye yaklaştırma işini validasyon değil, prompt +
-    "en iyisini biriktir" stratejisi üstleniyor (aşağıya bakın).
-    """
     if not data:
-        return False, None, None, None, "Yanıt boş veya parse edilemedi"
+        return False, None, None, None, None, "Yanıt boş veya parse edilemedi"
 
     emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
     n_en = data.get("narrative_en", "").strip()
     n_tr = data.get("narrative_tr", "").strip()
+    alt_tr = data.get("alt_tr", "").strip() or None
 
     if not n_en or not n_tr:
-        return False, None, None, None, "Metin alanları eksik (narrative_en veya narrative_tr boş)"
+        return False, None, None, None, None, "Metin alanları eksik (narrative_en veya narrative_tr boş)"
 
-    # Bütçeyi aşmak bir hata değil, sadece tam cümle sonunda kırpılması gereken normal bir durum.
     if len(n_en) > budget_en:
         n_en = fit_complete_sentences(n_en, budget_en)
     if len(n_tr) > budget_tr:
         n_tr = fit_complete_sentences(n_tr, budget_tr)
 
     if not is_valid_turkish(n_tr):
-        return False, None, None, None, "Türkçe metin doğrulaması başarısız (İngilizce saptandı)"
+        return False, None, None, None, None, "Türkçe metin doğrulaması başarısız (İngilizce saptandı)"
 
     if not validate_internal_punctuation(n_tr, max_internal=2):
-        return False, None, None, None, "Türkçe cümlede 2'den fazla iç noktalama işareti var"
+        return False, None, None, None, None, "Türkçe cümlede 2'den fazla iç noktalama işareti var"
 
     if len(n_en) < min_en or len(n_tr) < min_tr:
-        return False, None, None, None, f"Metin çok kısa (EN: {len(n_en)}/{min_en}, TR: {len(n_tr)}/{min_tr})"
+        return False, None, None, None, None, f"Metin çok kısa (EN: {len(n_en)}/{min_en}, TR: {len(n_tr)}/{min_tr})"
 
-    return True, emoji, n_en, n_tr, "Kusursuz"
+    return True, emoji, n_en, n_tr, alt_tr, "Kusursuz"
 
-def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
-    # Mutlak minimum: kabul edilebilir bir post için gereken taban uzunluk.
-    # Bunun altı gerçekten "kullanılamaz" demektir (yarım cümle, vs.). Üst sınıra
-    # yaklaşma işi artık burada değil, aşağıdaki "en iyisini sakla" döngüsünde.
+def generate_dual_language_posts(cand, extract, budget_en, budget_tr, caption=None):
     min_en = max(120, int(budget_en * 0.45))
     min_tr = max(120, int(budget_tr * 0.45))
-    # Bu eşiğe ulaşan bir aday "yeterince dolu" sayılır ve döngü erken biter.
     near_full_en = budget_en * 0.9
     near_full_tr = budget_tr * 0.9
+
+    caption_instruction = ""
+    if caption:
+        caption_instruction = (
+            f"\nImage Caption (Source): {caption}\n"
+            "- In 'alt_tr', write a concise, fluent Turkish translation/description of this image caption (under 250 chars) for screen readers."
+        )
 
     base_prompt = (
         "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
         f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
         f"Article Title: {cand['title']}\n"
         f"Curator Note (WHY IT IS UNUSUAL): {cand['curation_note']}\n"
-        f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
+        f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n"
+        f"{caption_instruction}\n\n"
         "GOAL:\n"
         "1. Craft a compelling 2 to 3-sentence micro-narrative in ENGLISH ('narrative_en') that hooks the reader with the sheer bizarre irony of this story.\n"
         "2. Craft a TURKISH version ('narrative_tr') of the same story. CRITICAL LANGUAGE RULE: 'narrative_tr' MUST be written 100% in natural, fluent, native TURKISH (TÜRKÇE). Under NO circumstances write English in narrative_tr! Never use aorist tense (-r, -ar, -er, -maz, -mez; 'yapılır', 'bilinir'); use past (-dı/-miş) or present continuous (-ıyor).\n\n"
@@ -540,24 +514,21 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "- Do not repeat or start with the article title.\n"
         "- No hashtags, no markdown formatting.\n"
         "- Select ONE matching emoji.\n"
-        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\"}."
+        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\", \"alt_tr\": \"...\"} (if no caption, alt_tr can be empty)."
     )
 
-    # Geçerli bulunan HER adayı burada tutuyoruz; en sonunda bütçeye en yakın
-    # (en dolu) olanı seçeceğiz. Böylece "ilk deneme mükemmel değildi" diye boşa
-    # düşen iyi metinler artık kaybolmuyor.
-    best = None  # (emoji, n_en, n_tr, toplam_uzunluk, kaynak)
+    best = None  # (emoji, n_en, n_tr, alt_tr, score, source)
 
-    def consider(emoji, n_en, n_tr, source):
+    def consider(emoji, n_en, n_tr, alt_tr, source):
         nonlocal best
         score = len(n_en) + len(n_tr)
-        if best is None or score > best[3]:
-            best = (emoji, n_en, n_tr, score, source)
+        if best is None or score > best[4]:
+            best = (emoji, n_en, n_tr, alt_tr, score, source)
 
     def is_full_enough():
         if not best:
             return False
-        _, n_en, n_tr, _, _ = best
+        _, n_en, n_tr, _, _, _ = best
         return len(n_en) >= near_full_en and len(n_tr) >= near_full_tr
 
     print(f"\n--- AI Üretim Süreci Başlıyor ---")
@@ -578,12 +549,12 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         # 1. DENEME: ÖNCE GEMINI
         print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 3.5 Flash] çağrılıyor...")
         data_gemini = request_gemini(prompt)
-        ok, emoji, n_en, n_tr, reason = validate_candidate_output(
+        ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
             data_gemini, budget_en, budget_tr, min_en, min_tr
         )
         if ok:
             print(f"[Gemini] Geçerli aday (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
-            consider(emoji, n_en, n_tr, "Gemini")
+            consider(emoji, n_en, n_tr, alt_tr, "Gemini")
             if is_full_enough():
                 break
         else:
@@ -592,22 +563,22 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         # 2. DENEME: GEMINI BAŞARISIZ/YETERSİZ OLURSA GROQ'A GEÇ
         print(f"[Deneme {attempt}/3] [2. Öncelik: Groq Qwen3.6] devreye giriyor...")
         data_groq = request_groq(prompt)
-        ok, emoji, n_en, n_tr, reason = validate_candidate_output(
+        ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
             data_groq, budget_en, budget_tr, min_en, min_tr
         )
         if ok:
             print(f"[Groq] Geçerli aday (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
-            consider(emoji, n_en, n_tr, "Groq")
+            consider(emoji, n_en, n_tr, alt_tr, "Groq")
         else:
             print(f"[Groq] Çıktı uygun bulunmadı ({reason}).")
 
     if best:
-        emoji, n_en, n_tr, _score, source = best
+        emoji, n_en, n_tr, alt_tr, _score, source = best
         print(f"\n===> Kullanılacak metin [{source}] (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
-        return emoji, n_en, n_tr
+        return emoji, n_en, n_tr, alt_tr
 
     print("\n[UYARI] Hem Gemini hem Groq başarısız oldu. Çift dilli AI metni üretilemedi!")
-    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None
+    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None, None
 
 def build_post(display_title, narrative, emoji, page_url):
     builder = client_utils.TextBuilder()
@@ -683,21 +654,17 @@ def main():
         page_url_tr = page_url_en
         title_tr = title_en
 
+    # Görsel ve Açıklamayı (Caption) AI işleminden önce çekiyoruz
     img_url = (
         target_data.get("originalimage", {}).get("source") or 
         target_data.get("thumbnail", {}).get("source")
     )
     image_bytes = None
-    alt_text_en = f"{title_en} Wikipedia image"
-    alt_text_tr = f"{title_tr} Vikipedi görseli"
+    caption = None
 
     if img_url:
         try:
             caption = fetch_image_caption(domain, title_en, img_url)
-            if caption:
-                alt_text_en = f"{title_en}: {caption}"[:495]
-                alt_text_tr = f"{title_tr}: {caption}"[:495]
-
             r = requests.get(clean_url(img_url), headers=HEADERS, timeout=20)
             if r.status_code == 200:
                 image_bytes = optimize_image(r.content)
@@ -710,9 +677,17 @@ def main():
     header_len_tr = len(title_tr) + 5
     budget_tr = TOTAL_BLUESKY_BUDGET - header_len_tr - 2
 
-    emoji, narrative_en, narrative_tr = generate_dual_language_posts(
-        chosen_candidate, extract, budget_en, budget_tr
+    # Metinleri ve Türkçe alt açıklamayı (alt_tr_ai) üret
+    emoji, narrative_en, narrative_tr, alt_tr_ai = generate_dual_language_posts(
+        chosen_candidate, extract, budget_en, budget_tr, caption=caption
     )
+
+    # Alt metinleri hazırla: İngilizce için kaynak caption, Türkçe için AI çevirisi / yerelleştirmesi
+    alt_text_en = f"{title_en}: {caption}"[:495] if caption else f"{title_en} Wikipedia image"
+    if alt_tr_ai:
+        alt_text_tr = f"{title_tr}: {alt_tr_ai}"[:495]
+    else:
+        alt_text_tr = f"{title_tr} Vikipedi görseli"
 
     post_en = build_post(title_en, narrative_en, emoji, page_url_en)
 
