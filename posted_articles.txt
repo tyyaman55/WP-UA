@@ -45,3 +45,4 @@ en:Mount Rushmore
 en:Flat Earth
 en:The Christian Science Monitor
 en:The Nethernet
+es:Triángulo de Hess
