@@ -535,7 +535,7 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr, caption=No
     print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, GROQ={'Tanımlı' if GROQ_API_KEY else 'YOK'}")
 
     for attempt in range(1, 4):
-        if is_full_enough():
+        if ok:
             break
 
         prompt = base_prompt
