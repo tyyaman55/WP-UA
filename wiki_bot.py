@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.2 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.3 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -215,7 +215,6 @@ def fetch_summary(domain, title):
     return None
 
 def get_turkish_wiki_page(domain, title):
-    """Maddenin varsa Türkçe Wikipedia karşılığını ve yerelleştirilmiş başlığını bulur."""
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
     lang_code = domain.split(".")[0]
 
@@ -316,6 +315,19 @@ def fit_complete_sentences(text, max_len):
     last_space = truncated.rfind(' ')
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
+def validate_internal_punctuation(text, max_internal=2):
+    """Bir cümlenin İÇİNDE (nokta, soru, ünlem hariç) 2'den fazla noktalama işareti olup olmadığını denetler."""
+    if not text:
+        return True
+    # Cümleleri son noktalama işaretlerine göre ayır
+    sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+    for s in sentences:
+        # Cümle içi noktalama işaretleri: virgül, noktalı virgül, iki nokta, tire, parantez
+        internal_marks = re.findall(r'[,;:\-—–()[\]]', s)
+        if len(internal_marks) > max_internal:
+            return False
+    return True
+
 def parse_json_safely(raw_str):
     if not raw_str:
         return None
@@ -411,15 +423,16 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "TASKS:\n"
         "1. Select ONE single emoji matching the topic.\n"
         "2. Write an English narrative ('narrative_en') focusing on the bizarre paradox, odd law, or funny accident with intelligent dry mischief.\n"
-        "3. Write a Turkish narrative ('narrative_tr') about the same core fact.\n\n"
-        "STRICT TURKISH TENSE & STYLE RULES (ÇOK ÖNEMLİ):\n"
-        "- ASLA GENİŞ ZAMAN (-r, -ar, -er, -ır, -ir, -maz, -mez; 'yapılır', 'kutlanır', 'bilinir', 'yer alır') KULLANMAYIN. Geniş zaman metni ruhsuz, resmi ve tercüme bir ansiklopedi maddesine dönüştürür.\n"
-        "- Bunun yerine olayı bir arkadaşınıza ilgi çekici bir hikâye anlatıyormuş gibi aktarın. SADECE geçmiş zaman (-dı/-di, -tı/-ti, -mış/-miş) veya canlı anlatım için şimdiki zaman (-ıyor/-iyor) kullanın.\n"
-        "- Son derece akıcı, doğal, günlük Türkçe söz dizimi kurun. Çeviri kokan kalıplardan uzak durun.\n\n"
-        "GENERAL STYLE GUIDELINES:\n"
-        "- Hook the reader with genuine curiosity. Slight playful irony is welcome.\n"
-        "- No cheesy clickbait hooks ('Imagine this', 'Düşünün ki'). Dive straight into the unusual reality.\n\n"
-        "LENGTH CONSTRAINTS (CRITICAL - FILL THE BUDGET):\n"
+        "3. Write a Turkish narrative ('narrative_tr') about the same core fact in natural, flowing Turkish.\n\n"
+        "STRICT PUNCTUATION & SENTENCE RULES (CRITICAL):\n"
+        "- AVOID EXCESSIVE PUNCTUATION. Do NOT clutter sentences with commas, semicolons, or dashes.\n"
+        "- HARD PUNCTUATION CEILING: Inside any single sentence, there MUST NOT be more than TWO mid-sentence punctuation marks (e.g., maximum 2 commas per sentence, excluding the ending period/exclamation mark).\n"
+        "- If an idea requires 3 or more commas/clauses, YOU MUST SPLIT THE SENTENCE into two or three shorter, punchy sentences.\n\n"
+        "TURKISH TENSE & STYLE RULES:\n"
+        "- ASLA GENİŞ ZAMAN (-r, -ar, -er, -ır, -ir, -maz, -mez; 'yapılır', 'bilinir') KULLANMAYIN.\n"
+        "- Sadece geçmiş zaman (-dı/-di, -mış/-miş) veya şimdiki zaman (-ıyor/-iyor) kullanın.\n"
+        "- Doğal, günlük konuşma ritminde olsun.\n\n"
+        "LENGTH CONSTRAINTS (FILL THE BUDGET):\n"
         f"- narrative_en: MUST be between {target_min_en} and {budget_en} characters.\n"
         f"- narrative_tr: MUST be between {target_min_tr} and {budget_tr} characters.\n"
         "- Both narratives MUST end with complete, finished punctuation (. ! ?).\n"
@@ -430,7 +443,11 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
     for attempt in range(1, 4):
         prompt = base_prompt
         if attempt > 1:
-            prompt += "\n\nCRITICAL RETRY NOTICE: One or both narratives were too short! Expand with rich paradoxes and concrete details to meet the character budgets. Remember: NEVER use Turkish aorist tense (-r, -mez)."
+            prompt += (
+                "\n\nCRITICAL RETRY NOTICE: Either a sentence had MORE than 2 internal punctuation marks (commas/dashes), "
+                "or the text was too short. Remember: Split long multi-comma sentences into shorter sentences, "
+                "avoid excessive punctuation, and meet the character budget!"
+            )
 
         data = None
         if GEMINI_API_KEY:
@@ -449,11 +466,17 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
                 if len(n_tr) > budget_tr:
                     n_tr = fit_complete_sentences(n_tr, budget_tr)
 
-                if (len(n_en) >= target_min_en and len(n_tr) >= target_min_tr) or attempt == 3:
+                length_ok = (len(n_en) >= target_min_en and len(n_tr) >= target_min_tr)
+                punct_ok_tr = validate_internal_punctuation(n_tr, max_internal=2)
+
+                if (length_ok and punct_ok_tr) or attempt == 3:
                     print(f"Yapay zeka metinleri onaylandı (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr, Deneme {attempt})")
                     return emoji, n_en, n_tr
 
-                print(f"Metinler bütçeyi doldurmadı (EN: {len(n_en)}, TR: {len(n_tr)}). Yeniden deneniyor ({attempt}/3)...")
+                if not punct_ok_tr:
+                    print(f"Türkçe metinde bir cümlede 2'den fazla iç noktalama işareti bulundu. Yeniden deneniyor ({attempt}/3)...")
+                else:
+                    print(f"Metinler bütçeyi doldurmadı (EN: {len(n_en)}, TR: {len(n_tr)}). Yeniden deneniyor ({attempt}/3)...")
 
     print("Yapay zeka yanıt vermedi, acil durum metinlerine dönülüyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), fit_complete_sentences(extract, budget_tr)
