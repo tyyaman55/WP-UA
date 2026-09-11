@@ -150,7 +150,13 @@ def extract_candidates_from_source(source):
             return []
 
         html_text = resp.json().get("parse", {}).get("text", {}).get("*", "")
-        li_blocks = re.findall(r'<li\b[^>]*>(.*?)</li>', html_text, flags=re.DOTALL | re.IGNORECASE)
+
+        # NOT: Bu sayfaların çoğu artık düz <li> madde listesi değil, wikitable
+        # (<tr><td>...) satırları olarak biçimlendiriliyor (bölge/ülke | madde | not
+        # şeklinde 3 sütun). Sadece <li> aranırsa maddelerin büyük çoğunluğu (yüzlerce)
+        # atlanır ve sadece hâlâ düz liste olan birkaç bölümden (~20 madde) sonuç gelir.
+        # Bu yüzden hem <li> hem <tr> blokları aynı anda yakalanıyor.
+        blocks = re.findall(r'<(?P<tag>li|tr)\b[^>]*>(?P<content>.*?)</(?P=tag)>', html_text, flags=re.DOTALL | re.IGNORECASE)
 
         skip_prefixes = (
             "wikipedia:", "wikipédia:", "file:", "fichier:", "datei:", "archivo:",
@@ -161,13 +167,21 @@ def extract_candidates_from_source(source):
             "mediawiki:"
         )
 
-        candidates = []
-        for li in li_blocks:
-            links = re.findall(r'<a\s+[^>]*href=["\']/wiki/([^"#?:]+)["\'][^>]*>(.*?)</a>', li, flags=re.DOTALL | re.IGNORECASE)
-            if not links:
-                continue
+        def pick_title(block_html):
+            # Tablo satırlarında ilk hücre genelde bölge/ülke adı (ör. "Illinois"),
+            # asıl ilginç madde ise Vikipedi kuralı gereği KALIN (<b>) yazılan link
+            # olur (ör. "'''[[Bubbly Creek]]'''"). Bu yüzden önce kalın linki dene;
+            # bulunamazsa (düz <li> listelerinde olduğu gibi) ilk uygun linke düş.
+            bold_match = re.search(
+                r'<b>\s*<a\s+[^>]*href=["\']/wiki/([^"#?:]+)["\'][^>]*>(.*?)</a>\s*</b>',
+                block_html, flags=re.DOTALL | re.IGNORECASE
+            )
+            if bold_match:
+                decoded = urllib.parse.unquote(bold_match.group(1)).replace('_', ' ').strip()
+                if not any(decoded.lower().startswith(p) for p in skip_prefixes):
+                    return decoded
 
-            target_title = None
+            links = re.findall(r'<a\s+[^>]*href=["\']/wiki/([^"#?:]+)["\'][^>]*>(.*?)</a>', block_html, flags=re.DOTALL | re.IGNORECASE)
             for raw_slug, _ in links:
                 decoded = urllib.parse.unquote(raw_slug).replace('_', ' ').strip()
                 d_lower = decoded.lower()
@@ -177,18 +191,29 @@ def extract_candidates_from_source(source):
                 if d_lower.startswith(("list of", "liste de", "liste von", "lista de", "chronologie", "liste des")):
                     continue
 
-                target_title = decoded
-                break
+                return decoded
+            return None
 
+        candidates = []
+        seen_titles = set()
+        for _tag, block in blocks:
+            target_title = pick_title(block)
             if not target_title:
                 continue
 
-            clean_note = re.sub(r'<[^>]+>', ' ', li)
+            clean_note = re.sub(r'<[^>]+>', ' ', block)
             clean_note = re.sub(r'\s+', ' ', clean_note).strip()
             clean_note = html.unescape(clean_note)
 
             if len(clean_note) < 25:
                 continue
+
+            # <tr> bazen iç içe başka bloklarla (ör. iç tablo/resim) çakışıp aynı
+            # maddeyi birden fazla üretebilir; başlığa göre yinelenenleri ele.
+            dedup_key = target_title.lower()
+            if dedup_key in seen_titles:
+                continue
+            seen_titles.add(dedup_key)
 
             candidates.append({
                 "lang": lang,
