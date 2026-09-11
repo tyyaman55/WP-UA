@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.0 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.1 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -214,6 +214,42 @@ def fetch_summary(domain, title):
         pass
     return None
 
+def get_turkish_wiki_page(domain, title):
+    """Maddenin varsa Türkçe Wikipedia karşılığını ve yerelleştirilmiş başlığını bulur."""
+    safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
+    lang_code = domain.split(".")[0]
+    
+    # Eğer kaynak zaten Türkçe ise
+    if lang_code == "tr":
+        return f"https://tr.wikipedia.org/wiki/{safe_title}", title
+
+    # Interlanguage linkleri için Action=query API'si
+    api_url = clean_url(f"https://{domain}/w/api.php")
+    params = {
+        "action": "query",
+        "titles": title,
+        "prop": "langlinks",
+        "lllang": "tr",
+        "format": "json"
+    }
+
+    try:
+        resp = requests.get(api_url, params=params, headers=HEADERS, timeout=10)
+        if resp.status_code == 200:
+            pages = resp.json().get("query", {}).get("pages", {})
+            for page_id, page_info in pages.items():
+                langlinks = page_info.get("langlinks", [])
+                if langlinks:
+                    tr_title = langlinks[0].get("*")
+                    if tr_title:
+                        safe_tr = urllib.parse.quote(tr_title.replace(" ", "_"), safe="")
+                        print(f"Türkçe karşılığı bulundu: {tr_title}")
+                        return f"https://tr.wikipedia.org/wiki/{safe_tr}", tr_title
+    except Exception as e:
+        print(f"Türkçe dil bağlantısı sorgulama hatası: {e}")
+
+    return None, None
+
 def fetch_image_caption(domain, title, img_url):
     if not img_url:
         return None
@@ -365,24 +401,22 @@ def request_groq(prompt):
     return None
 
 def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
-    """Tek bir AI çağrısıyla hem İngilizce hem Türkçe dolgun ve merak uyandırıcı metin üretir."""
     target_min_en = max(200, budget_en - 25)
     target_min_tr = max(200, budget_tr - 25)
 
     base_prompt = (
-        "You curate twin Bluesky accounts (one in English, one in Turkish) dedicated to reality's strangest oddities.\n"
+        "You curate twin Bluesky feeds dedicated to reality's strangest oddities.\n"
         f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
         f"Article Title: {cand['title']}\n"
         f"Curator Note (WHY IT IS UNUSUAL): {cand['curation_note']}\n"
         f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
         "TASKS:\n"
         "1. Select ONE single emoji matching the topic.\n"
-        "2. Write an English narrative ('narrative_en') focusing on the bizarre paradox, odd law, or funny accident.\n"
-        "3. Write a Turkish narrative ('narrative_tr') about the same core fact. It must be written directly in native, natural, captivating Turkish (NOT a clunky word-for-word translation).\n\n"
-        "TONE & STYLE GUIDELINES (FOR BOTH LANGUAGES):\n"
-        "- Hook the reader with genuine curiosity and a subtle touch of intelligent, dry mischief (hafif muzip, zekice, merak uyandırıcı).\n"
-        "- Laubali/saygısız olmadan, ama asla resmi ders kitabı veya kuru ansiklopedi monotonluğuna girmeden anlatın.\n"
-        "- Do NOT use cheap stock hooks ('Imagine this', 'Picture this', 'Meet the', 'Düşünün ki', 'İnanamayacaksınız'). Dive directly into the unusual reality.\n\n"
+        "2. Write an English narrative ('narrative_en') focusing on the bizarre paradox, odd law, or funny accident with intelligent dry mischief.\n"
+        "3. Write a Turkish narrative ('narrative_tr') about the same core fact. CRITICAL RULE FOR TURKISH: Do NOT write a robotic translation or stiff textbook sentence. Write it in smooth, natural, native daily Turkish (akıcı, doğal, günlük konuşma ritminde, hafif muzip ve samimi bir dille, 'çeviri' gibi durmayan özgün bir Türkçe metin).\n\n"
+        "GENERAL STYLE GUIDELINES:\n"
+        "- Hook the reader with genuine curiosity.\n"
+        "- No cheesy clickbait hooks ('Imagine this', 'Düşünün ki'). Dive straight into the unusual reality.\n\n"
         "LENGTH CONSTRAINTS (CRITICAL - FILL THE BUDGET):\n"
         f"- narrative_en: MUST be between {target_min_en} and {budget_en} characters.\n"
         f"- narrative_tr: MUST be between {target_min_tr} and {budget_tr} characters.\n"
@@ -422,10 +456,10 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
     print("Yapay zeka yanıt vermedi, acil durum metinlerine dönülüyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), fit_complete_sentences(extract, budget_tr)
 
-def build_post(cand, narrative, emoji, page_url):
+def build_post(display_title, narrative, emoji, page_url):
     builder = client_utils.TextBuilder()
     builder.text(f"{emoji} ")
-    builder.link(cand['title'].upper(), page_url)
+    builder.link(display_title.upper(), page_url)
     builder.text("\n\n")
     builder.text(narrative)
     return builder
@@ -482,10 +516,21 @@ def main():
         print("Uygun sıra dışı madde bulunamadı.")
         return
 
-    title = chosen_candidate["title"]
+    title_en = chosen_candidate["title"]
     domain = chosen_candidate["domain"]
     extract = target_data.get("extract", "").strip()
-    page_url = target_data.get("content_urls", {}).get("desktop", {}).get("page", "")
+    
+    # İngilizce link ve başlık
+    page_url_en = target_data.get("content_urls", {}).get("desktop", {}).get("page", "")
+
+    # Türkçe link ve başlık kontrolü (Varsa tr.wikipedia.org)
+    tr_url, tr_title = get_turkish_wiki_page(domain, title_en)
+    if tr_url and tr_title:
+        page_url_tr = tr_url
+        title_tr = tr_title
+    else:
+        page_url_tr = page_url_en
+        title_tr = title_en
 
     # Görsel Hazırlığı
     img_url = (
@@ -493,15 +538,15 @@ def main():
         target_data.get("thumbnail", {}).get("source")
     )
     image_bytes = None
-    alt_text_en = f"{title} Wikipedia image"
-    alt_text_tr = f"{title} Vikipedi görseli"
+    alt_text_en = f"{title_en} Wikipedia image"
+    alt_text_tr = f"{title_tr} Vikipedi görseli"
 
     if img_url:
         try:
-            caption = fetch_image_caption(domain, title, img_url)
+            caption = fetch_image_caption(domain, title_en, img_url)
             if caption:
-                alt_text_en = f"{title}: {caption}"[:495]
-                alt_text_tr = f"{title}: {caption}"[:495]
+                alt_text_en = f"{title_en}: {caption}"[:495]
+                alt_text_tr = f"{title_tr}: {caption}"[:495]
 
             r = requests.get(clean_url(img_url), headers=HEADERS, timeout=20)
             if r.status_code == 200:
@@ -509,17 +554,21 @@ def main():
         except Exception as e:
             print(f"Görsel indirilemedi: {e}")
 
-    # Bütçe Hesaplama
-    header_len = len(title) + 5
-    available_budget = TOTAL_BLUESKY_BUDGET - header_len - 2
+    # Bütçe Hesaplama (EN için)
+    header_len_en = len(title_en) + 5
+    budget_en = TOTAL_BLUESKY_BUDGET - header_len_en - 2
 
-    # Metin Üretimi (Tek Seferde İki Dil)
+    # Bütçe Hesaplama (TR için)
+    header_len_tr = len(title_tr) + 5
+    budget_tr = TOTAL_BLUESKY_BUDGET - header_len_tr - 2
+
+    # Metin Üretimi (Tek Seferde İki Dil, Akıcı Türkçe)
     emoji, narrative_en, narrative_tr = generate_dual_language_posts(
-        chosen_candidate, extract, available_budget, available_budget
+        chosen_candidate, extract, budget_en, budget_tr
     )
 
-    post_en = build_post(chosen_candidate, narrative_en, emoji, page_url)
-    post_tr = build_post(chosen_candidate, narrative_tr, emoji, page_url)
+    post_en = build_post(title_en, narrative_en, emoji, page_url_en)
+    post_tr = build_post(title_tr, narrative_tr, emoji, page_url_tr)
 
     # 1. HESAP: İNGİLİZCE PAYLAŞIM
     try:
@@ -529,11 +578,11 @@ def main():
             client_en.send_image(text=post_en, image=image_bytes, image_alt=alt_text_en)
         else:
             client_en.send_post(text=post_en)
-        print(f"[EN Hesap] Başarıyla paylaşıldı: {title}")
+        print(f"[EN Hesap] Başarıyla paylaşıldı: {title_en}")
     except Exception as e:
         print(f"[EN Hesap] Paylaşım hatası: {e}")
 
-    # 2. HESAP: TÜRKÇE PAYLAŞIM (Eğer tanımlıysa)
+    # 2. HESAP: TÜRKÇE PAYLAŞIM
     if BSKY_HANDLE_TR and BSKY_APP_PASSWORD_TR:
         try:
             client_tr = Client()
@@ -542,14 +591,14 @@ def main():
                 client_tr.send_image(text=post_tr, image=image_bytes, image_alt=alt_text_tr)
             else:
                 client_tr.send_post(text=post_tr)
-            print(f"[TR Hesap] Başarıyla paylaşıldı: {title}")
+            print(f"[TR Hesap] Başarıyla paylaşıldı: {title_tr}")
         except Exception as e:
             print(f"[TR Hesap] Paylaşım hatası: {e}")
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
     # Ortak Arşiv Kaydı
-    save_posted_title(f"{chosen_candidate['lang']}:{title}")
+    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
 
 if __name__ == "__main__":
     main()
