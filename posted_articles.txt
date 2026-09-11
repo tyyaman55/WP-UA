@@ -62,3 +62,4 @@ en:1593 transported soldier legend
 en:Shibboleth
 en:Alarmo
 en:Life of Brian (Family Guy)
+en:New Zealand national team nomenclature based on the "All Blacks"
