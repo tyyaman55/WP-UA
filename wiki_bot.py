@@ -431,17 +431,26 @@ def request_deepseek(prompt):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.8,
-        "max_tokens": 1200,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+        "reasoning_effort": "none"
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=20)
+        resp = requests.post(url, headers=headers, json=payload, timeout=30)
         if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"]
+            choice = resp.json()["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = choice.get("finish_reason", "")
+
+            if not content or not content.strip():
+                print(f"[DeepSeek] Boş içerik döndü (finish_reason={finish_reason}).")
+                return None
+
             parsed = parse_json_safely(content)
             if parsed:
                 return parsed
-            print(f"[DeepSeek] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
+            print(f"[DeepSeek] JSON çözülemedi: {content[:200]}")
         else:
             print(f"[DeepSeek] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
@@ -544,7 +553,7 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr, caption=No
             print(f"[Gemini] Çıktı uygun bulunmadı ({reason}).")
 
         # 2. ÖNCELİK: YEDEK OLARAK DEEPSEEK
-        print(f"[Deneme {attempt}/3] [2. Öncelik: DeepSeek Chat (Yedek)] devreye giriyor...")
+        print(f"[Deneme {attempt}/3] [2. Öncelik: DeepSeek Flash (Yedek)] devreye giriyor...")
         data_deepseek = request_deepseek(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
             data_deepseek, budget_en, budget_tr, min_en, min_tr
