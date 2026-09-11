@@ -40,3 +40,4 @@ en:Gare Montparnasse
 en:Isometric projection
 en:Bir Tawil
 en:Cartesian theatre
+en:Statue of Louis Agassiz
