@@ -289,7 +289,7 @@ def request_groq(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "openai/gpt-oss-120b",
+        "model": "qwen/qwen3-32b",
         "messages": [
             {
                 "role": "system",
@@ -298,20 +298,23 @@ def request_groq(prompt):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.75,
-        "reasoning_effort": "low",
+        "reasoning_effort": "none",
         "max_tokens": 1500
     }
 
     try:
-        print("Groq API devreye giriyor (GPT-OSS 120B)...")
+        print("Groq API devreye giriyor (Qwen3 32B)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             result = resp.json()
             content = result["choices"][0]["message"]["content"]
+            if not content or not content.strip():
+                print(f"Groq boş içerik döndürdü. Tam yanıt: {json.dumps(result)[:400]}")
+                return None
             parsed = parse_json_safely(content)
             if parsed:
                 return parsed
-            print(f"Groq JSON parse edilemedi: {content[:200]}")
+            print(f"Groq JSON parse edilemedi, ham içerik: {content[:300]}")
         else:
             print(f"Groq API Hatası (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
