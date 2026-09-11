@@ -29,3 +29,4 @@ en:Nils Olav
 en:Cosmic latte
 en:Depths of Wikipedia
 en:Something Awful
+en:The Straight Dope
