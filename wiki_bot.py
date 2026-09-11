@@ -315,7 +315,7 @@ def request_groq(prompt):
     return None
 
 def generate_ai_curated_post(title, extract, available_budget):
-    target_min = max(200, available_budget - 20)
+    target_min = max(available_budget - 15, int(available_budget * 0.9))
 
     prompt = (
         "You are the curator of a top Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes. "
@@ -332,11 +332,16 @@ def generate_ai_curated_post(title, extract, available_budget):
         "- Do not address the reader directly (no \"you\", no rhetorical questions used as a device, no commands like \"buckle up\").\n"
         "- Avoid breathless or tabloid-style intensifiers (\"insane\", \"wild\", \"you won't believe\", \"absolutely bonkers\"). Let the facts carry the weight.\n"
         "- Tone: informative and precise, with dry, understated wit where it fits naturally — never silly, never overly casual or slangy.\n"
-        "- Write like a knowledgeable person explaining something remarkable to a curious friend, not like a viral-content copywriter.\n\n"
-        "CRITICAL CHARACTER BUDGET REQUIREMENTS (DO NOT IGNORE):\n"
-        f"- Target Length: You MUST write between {target_min} and {available_budget} characters. Do NOT write brief summaries.\n"
+        "- Write like a knowledgeable person explaining something remarkable to a curious friend, not like a viral-content copywriter.\n"
+        "- Being concise is NOT a style goal here. A short, punchy one- or two-sentence answer is a FAILURE even if the tone is otherwise perfect. "
+        "Depth and specificity are part of the assignment: include multiple concrete details (names, dates, numbers, causes, consequences, ironies) from the background text, not just one fact restated.\n\n"
+        "CRITICAL CHARACTER BUDGET REQUIREMENTS (DO NOT IGNORE — THIS IS THE MOST IMPORTANT CONSTRAINT):\n"
+        f"- Your narrative MUST be at least {target_min} characters long, and should get as close as possible to {available_budget} characters without exceeding it.\n"
+        f"- A narrative shorter than {target_min} characters is INCORRECT and must be expanded with more specific detail before you finalize it — do not stop after one or two sentences.\n"
         f"- Absolute Maximum: Under NO circumstances exceed {available_budget} characters (hard platform cutoff).\n"
+        "- Aim for 3-5 full sentences that each add a new specific detail, not filler or repetition.\n"
         "- Sentence Structure: You must end with a full, grammatically complete sentence (ending with . ! or ?).\n"
+        "- Before answering, silently count the characters in your narrative and, if it falls short of the minimum, add another concrete detail from the background text.\n"
         "- Language: English.\n"
         "- Do not start with or repeat the article title.\n"
         "- Do not include hashtags, markdown bolding, or links.\n"
