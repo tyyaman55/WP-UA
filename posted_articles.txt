@@ -42,3 +42,4 @@ en:Bir Tawil
 en:Cartesian theatre
 en:Statue of Louis Agassiz
 en:Mount Rushmore
+en:Flat Earth
