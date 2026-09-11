@@ -289,7 +289,7 @@ def request_groq(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "qwen/qwen3-32b",
+        "model": "qwen/qwen3.6-27b",
         "messages": [
             {
                 "role": "system",
@@ -303,7 +303,7 @@ def request_groq(prompt):
     }
 
     try:
-        print("Groq API devreye giriyor (Qwen3 32B)...")
+        print("Groq API devreye giriyor (Qwen3.6 27B)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             result = resp.json()
