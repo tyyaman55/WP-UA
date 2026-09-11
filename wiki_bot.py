@@ -5,6 +5,7 @@ import random
 import re
 import json
 import base64
+import html
 import urllib.parse
 import requests
 from io import BytesIO
@@ -16,12 +17,12 @@ BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
-GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")  # "owner/repo"
+GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/3.8 (https://bsky.app/; personal curation bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/4.0 (https://bsky.app/; curated unusual articles bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -30,8 +31,31 @@ GITHUB_API_HEADERS = {
 }
 
 TOTAL_BLUESKY_BUDGET = 300
-MAX_BLOB_IMAGE_SIZE = 950_000
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
+
+# YALNIZCA BU 4 RESMİ LİSTE KULLANILIR
+UNUSUAL_SOURCES = [
+    {
+        "lang": "en",
+        "domain": "en.wikipedia.org",
+        "page": "Wikipedia:Unusual_articles"
+    },
+    {
+        "lang": "de",
+        "domain": "de.wikipedia.org",
+        "page": "Wikipedia:Kuriositätenkabinett"
+    },
+    {
+        "lang": "es",
+        "domain": "es.wikipedia.org",
+        "page": "Wikipedia:Artículos_peculiares"
+    },
+    {
+        "lang": "fr",
+        "domain": "fr.wikipedia.org",
+        "page": "Wikipédia:Articles_insolites"
+    }
+]
 
 def clean_url(raw_url):
     if not raw_url:
@@ -40,9 +64,8 @@ def clean_url(raw_url):
     return match.group(0) if match else raw_url
 
 def get_posted_titles():
-    """Kayıt dosyasını GitHub API üzerinden repodan okur (yarış durumlarından etkilenmez)."""
+    """Kayıt dosyasını doğrudan GitHub API üzerinden okur."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("GITHUB_TOKEN veya GITHUB_REPOSITORY tanımlı değil, boş liste ile devam ediliyor.")
         return set()
 
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
@@ -52,22 +75,13 @@ def get_posted_titles():
             content_b64 = resp.json().get("content", "")
             text = base64.b64decode(content_b64).decode("utf-8")
             return set(line.strip() for line in text.splitlines() if line.strip())
-        elif resp.status_code == 404:
-            return set()
-        else:
-            print(f"Kayıt dosyası okunamadı (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         print(f"Kayıt dosyası okunurken hata: {e}")
     return set()
 
-def save_posted_title(title, max_retries=5):
-    """Kayıt dosyasını GitHub Contents API ile günceller.
-
-    Her denemede güncel içerik + sha çekilir, satır eklenir ve geri yazılır.
-    SHA çakışması (başka bir çalıştırma araya girdiyse) olursa yeniden dener.
-    """
+def save_posted_title(record_key, max_retries=5):
+    """Kayıt dosyasına yeni maddeyi GitHub Contents API ile ekler."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        print("GITHUB_TOKEN veya GITHUB_REPOSITORY tanımlı değil, kayıt atlanıyor.")
         return
 
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
@@ -81,17 +95,14 @@ def save_posted_title(title, max_retries=5):
             data = resp.json()
             sha = data["sha"]
             current_text = base64.b64decode(data["content"]).decode("utf-8")
-        elif resp.status_code != 404:
-            print(f"Kayıt dosyası okunamadı (HTTP {resp.status_code}): {resp.text[:200]}")
 
-        if title in set(line.strip() for line in current_text.splitlines() if line.strip()):
-            print(f"'{title}' zaten kayıtlı, tekrar yazılmıyor.")
+        if record_key in set(line.strip() for line in current_text.splitlines() if line.strip()):
             return
 
         new_text = current_text
         if new_text and not new_text.endswith("\n"):
             new_text += "\n"
-        new_text += f"{title}\n"
+        new_text += f"{record_key}\n"
 
         payload = {
             "message": "chore: update posted wiki archive [skip ci]",
@@ -103,43 +114,94 @@ def save_posted_title(title, max_retries=5):
 
         put_resp = requests.put(url, headers=GITHUB_API_HEADERS, json=payload, timeout=15)
         if put_resp.status_code in (200, 201):
-            print(f"'{title}' başarıyla kaydedildi.")
+            print(f"'{record_key}' başarıyla kaydedildi.")
             return
         elif put_resp.status_code in (409, 422):
-            print(f"SHA çakışması, tekrar deneniyor ({attempt}/{max_retries})...")
             time.sleep(1.5)
             continue
         else:
-            print(f"Kayıt hatası (HTTP {put_resp.status_code}): {put_resp.text[:200]}")
             return
 
-    print("Maksimum deneme sayısına ulaşıldı, kayıt başarısız oldu.")
+def extract_candidates_from_source(source):
+    """Listeden hem madde başlığını hem de küratörün 'unusual' açıklama notunu çeker."""
+    domain = source["domain"]
+    page = source["page"]
+    lang = source["lang"]
 
-def get_unusual_articles():
-    url = clean_url("https://en.wikipedia.org/w/api.php")
+    api_url = clean_url(f"https://{domain}/w/api.php")
     params = {
         "action": "parse",
-        "page": "Wikipedia:Unusual_articles",
-        "prop": "links",
+        "page": page,
+        "prop": "text",
+        "redirects": 1,
         "format": "json"
     }
+
     try:
-        resp = requests.get(url, params=params, headers=HEADERS, timeout=30)
-        data = resp.json()
-        links = data.get("parse", {}).get("links", [])
-        articles = [
-            l["*"] for l in links 
-            if l.get("ns") == 0 and "exists" in l and not l["*"].startswith("List of")
-        ]
-        print(f"Toplam sıra dışı madde sayısı: {len(articles)}")
-        return articles
+        resp = requests.get(api_url, params=params, headers=HEADERS, timeout=30)
+        if resp.status_code != 200:
+            return []
+
+        html_text = resp.json().get("parse", {}).get("text", {}).get("*", "")
+        li_blocks = re.findall(r'<li\b[^>]*>(.*?)</li>', html_text, flags=re.DOTALL | re.IGNORECASE)
+
+        skip_prefixes = (
+            "wikipedia:", "wikipédia:", "file:", "fichier:", "datei:", "archivo:",
+            "help:", "aide:", "hilfe:", "ayuda:", "category:", "catégorie:",
+            "kategorie:", "categoría:", "special:", "spezial:", "spécial:", "especial:",
+            "talk:", "diskussion:", "discussion:", "discusión:", "template:", "modèle:",
+            "vorlage:", "plantilla:", "portal:", "user:", "utilisateur:", "benutzer:", "usuario:",
+            "mediawiki:"
+        )
+
+        candidates = []
+        for li in li_blocks:
+            # İlk geçerli madde linkini yakala
+            links = re.findall(r'<a\s+[^>]*href=["\']/wiki/([^"#?:]+)["\'][^>]*>(.*?)</a>', li, flags=re.DOTALL | re.IGNORECASE)
+            if not links:
+                continue
+
+            target_title = None
+            for raw_slug, _ in links:
+                decoded = urllib.parse.unquote(raw_slug).replace('_', ' ').strip()
+                d_lower = decoded.lower()
+
+                if any(d_lower.startswith(p) for p in skip_prefixes):
+                    continue
+                if d_lower.startswith(("list of", "liste de", "liste von", "lista de", "chronologie", "liste des")):
+                    continue
+
+                target_title = decoded
+                break
+
+            if not target_title:
+                continue
+
+            # HTML etiketlerini temizleyip küratörün orijinal açıklama notunu al
+            clean_note = re.sub(r'<[^>]+>', ' ', li)
+            clean_note = re.sub(r'\s+', ' ', clean_note).strip()
+            clean_note = html.unescape(clean_note)
+
+            # Yeterli uzunlukta açıklama notu barındıran maddeleri kabul et
+            if len(clean_note) < 25:
+                continue
+
+            candidates.append({
+                "lang": lang,
+                "domain": domain,
+                "title": target_title,
+                "curation_note": clean_note
+            })
+
+        print(f"[{domain}] İncelenen maddelerden {len(candidates)} adet sıra dışı aday toplandı.")
+        return candidates
     except Exception as e:
-        print(f"Madde listesi çekilirken hata: {e}")
+        print(f"Kaynak okuma hatası ({domain}): {e}")
         return []
 
-def fetch_summary(title):
+def fetch_summary(domain, title):
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
-    url = clean_url(f"https://en.wikipedia.org/api/rest_v1/page/summary/{safe_title}")
+    url = clean_url(f"https://{domain}/api/rest_v1/page/summary/{safe_title}")
     try:
         resp = requests.get(url, headers=HEADERS, timeout=15)
         if resp.status_code == 200:
@@ -148,43 +210,35 @@ def fetch_summary(title):
         pass
     return None
 
-def fetch_image_caption(title, img_url):
-    """Maddedeki görsele ait orijinal altyazıyı (caption) çeker."""
+def fetch_image_caption(domain, title, img_url):
     if not img_url:
         return None
-        
     try:
-        # URL'den dosya adını ayıkla
         raw_filename = img_url.split('/')[-1]
         if re.match(r'^\d+px-', raw_filename):
             raw_filename = re.sub(r'^\d+px-', '', raw_filename)
         target_filename = urllib.parse.unquote(raw_filename).replace(' ', '_').lower()
 
         safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
-        media_url = clean_url(f"https://en.wikipedia.org/api/rest_v1/page/media-list/{safe_title}")
-        
+        media_url = clean_url(f"https://{domain}/api/rest_v1/page/media-list/{safe_title}")
+
         resp = requests.get(media_url, headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             items = resp.json().get("items", [])
             for item in items:
                 item_file = item.get("title", "").replace("File:", "").replace(" ", "_").lower()
-                # Dosya ismi eşleşirse veya lead görsel ise altyazıyı al
                 if item_file and (item_file == target_filename or target_filename in item_file):
                     caption = item.get("caption", {}).get("text", "").strip()
                     if caption:
                         clean_caption = re.sub(r'<[^>]+>', '', caption)
                         return re.sub(r'\s+', ' ', clean_caption).strip()
 
-            # Birebir eşleşmezse ilk maddenin altyazısını dene
             if items and items[0].get("caption", {}).get("text"):
-                first_caption = items[0]["caption"]["text"].strip()
-                clean_first = re.sub(r'<[^>]+>', '', first_caption)
-                clean_first = re.sub(r'\s+', ' ', clean_first).strip()
+                clean_first = re.sub(r'<[^>]+>', '', items[0]["caption"]["text"]).strip()
                 if clean_first:
                     return clean_first
     except Exception as e:
         print(f"Görsel açıklaması alınamadı: {e}")
-
     return None
 
 def optimize_image(img_bytes):
@@ -193,7 +247,7 @@ def optimize_image(img_bytes):
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
         img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
-        
+
         buffer = BytesIO()
         img.save(buffer, format="JPEG", quality=85, optimize=True)
         return buffer.getvalue()
@@ -204,7 +258,7 @@ def fit_complete_sentences(text, max_len):
     raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     collected = []
     current_len = 0
-    
+
     for s in raw_sentences:
         s = s.strip()
         if not s:
@@ -215,10 +269,10 @@ def fit_complete_sentences(text, max_len):
             current_len += added_len
         else:
             break
-            
+
     if collected:
         return " ".join(collected)
-        
+
     first = raw_sentences[0]
     truncated = first[:max_len - 1]
     last_space = truncated.rfind(' ')
@@ -261,8 +315,7 @@ def request_gemini(prompt):
         print("Gemini 2.5 Flash çağrılıyor...")
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code == 200:
-            result = resp.json()
-            candidates = result.get("candidates", [])
+            candidates = resp.json().get("candidates", [])
             if candidates:
                 parts = candidates[0].get("content", {}).get("parts", [])
                 for part in parts:
@@ -270,17 +323,12 @@ def request_gemini(prompt):
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-            print(f"Gemini geçerli bir JSON döndürmedi: {resp.text[:200]}")
-        else:
-            print(f"Gemini API Hatası (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         print(f"Gemini bağlantı hatası: {e}")
-
     return None
 
 def request_groq(prompt):
     if not GROQ_API_KEY:
-        print("GROQ_API_KEY tanımlı değil, Groq yedek adımı atlanıyor.")
         return None
 
     url = clean_url("https://api.groq.com/openai/v1/chat/completions")
@@ -306,44 +354,40 @@ def request_groq(prompt):
         print("Groq API devreye giriyor (Qwen3.6 27B)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
-            result = resp.json()
-            content = result["choices"][0]["message"]["content"]
-            if not content or not content.strip():
-                print(f"Groq boş içerik döndürdü. Tam yanıt: {json.dumps(result)[:400]}")
-                return None
+            content = resp.json()["choices"][0]["message"]["content"]
             parsed = parse_json_safely(content)
             if parsed:
                 return parsed
-            print(f"Groq JSON parse edilemedi, ham içerik: {content[:300]}")
-        else:
-            print(f"Groq API Hatası (HTTP {resp.status_code}): {resp.text[:200]}")
     except Exception as e:
         print(f"Groq bağlantı hatası: {e}")
-
     return None
 
-def generate_ai_curated_post(title, extract, available_budget):
-    target_min = max(available_budget - 15, int(available_budget * 0.9))
+def generate_ai_curated_post(cand, extract, available_budget):
+    target_min = max(available_budget - 18, int(available_budget * 0.92))
 
     prompt = (
-        "This article appears on Wikipedia's list of unusual articles. Read the background text below and identify "
-        "specifically what makes this subject unusual — not just what it's about in general.\n\n"
-        f"Article Title: {title}\n"
-        f"Article Background Details: {extract}\n\n"
-        "Write a short post about it, in English, built entirely around that unusual detail. "
-        "State what it is specifically — the odd fact, the strange event, the absurd rule, the improbable coincidence, whatever it is — "
-        "using the concrete details already in the background text (names, numbers, dates, causes).\n\n"
-        "Tone: write the way you'd tell a friend about something wild you just read, not the way an encyclopedia or a textbook would state it. "
-        "Conversational and natural, with normal sentence rhythm and contractions — not a dry list of facts, not a lecture, not a formal report. "
-        "At the same time, don't oversell it or get gimmicky/slangy about it — the surprise should come from the fact itself being genuinely strange, not from how excited you sound about it.\n\n"
-        "Rules:\n"
-        "- Don't open with \"Imagine\", \"Picture this\", \"What if\", \"Meet\", or similar stock hooks — just start telling it, naturally.\n"
-        "- Don't use hype words like \"insane\", \"wild\", \"you won't believe\", \"absolutely\".\n"
-        f"- Length: {target_min}–{available_budget} characters. End on a complete sentence.\n"
-        "- Don't repeat the article title.\n"
+        "You are the curator of a popular Bluesky account that uncovers extraordinary, bizarre, and fascinating Wikipedia rabbit holes.\n"
+        f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
+        f"Article Title: {cand['title']}\n"
+        f"Curator's List Annotation (EXPLAINS WHY IT IS UNUSUAL): {cand['curation_note']}\n"
+        f"Article Lead Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
+        "TASK:\n"
+        "1. Identify specifically WHAT makes this subject bizarre, unusual, or remarkable using both the Curator's Annotation and the Article Extract.\n"
+        "2. Write an intriguing, curiosity-provoking micro-narrative in ENGLISH built strictly around that unusual aspect.\n\n"
+        "TONE & STYLE GUIDELINES:\n"
+        "- The output narrative MUST BE 100% IN ENGLISH, regardless of the source language (German, French, Spanish, or English).\n"
+        "- Intriguing and captivating, never dry or boring. Spark deep curiosity in the reader.\n"
+        "- Respectful and grounded storytelling: NOT flippant, NOT disrespectful, and NOT slangy ('laubali olmadan').\n"
+        "- Avoid cheap hype or formulaic hooks like 'Imagine', 'Picture this', 'Meet', 'You won't believe', or 'Insane'. Present the strange reality directly with authentic punch.\n"
+        "- Weave in concrete details (names, dates, numbers, odd legal rules, or peculiar events).\n\n"
+        "STRICT LENGTH CONSTRAINTS:\n"
+        f"- Target Length: MUST be between {target_min} and {available_budget} characters. Maximize the character budget!\n"
+        f"- Absolute Maximum: Under NO circumstances exceed {available_budget} characters.\n"
+        "- MUST end with a complete, fully punctuated sentence (. ! or ?). Never cut off mid-thought.\n"
+        "- Do not repeat or begin with the article title.\n"
         "- No hashtags, no markdown, no links.\n"
-        "- Also pick ONE emoji that fits the subject.\n"
-        "- Respond with a single JSON object: {\"emoji\": \"...\", \"narrative\": \"...\"}."
+        "- Select ONE fitting emoji for the story.\n"
+        "- Output strictly a single JSON object: {\"emoji\": \"...\", \"narrative\": \"...\"}."
     )
 
     data = None
@@ -361,26 +405,27 @@ def generate_ai_curated_post(title, extract, available_budget):
                 narrative = fit_complete_sentences(narrative, available_budget)
             return emoji, narrative
 
-    print("Yapay zeka yanıt vermedi, acil durum ham metin formatına geçiliyor.")
+    print("Yapay zeka yanıt vermedi, acil durum metin kesimine geçiliyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
-def build_post(title, extract, page_url):
+def build_post(cand, extract, page_url):
     builder = client_utils.TextBuilder()
 
-    header_len_approx = len(title) + 5
-    available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_len_approx - 2
+    header_text_without_emoji = f" {cand['title'].upper()}\n\n"
+    header_cost = 2 + len(header_text_without_emoji)
+    available_narrative_budget = TOTAL_BLUESKY_BUDGET - header_cost - 2
 
-    emoji, narrative = generate_ai_curated_post(title, extract, available_narrative_budget)
+    emoji, narrative = generate_ai_curated_post(cand, extract, available_narrative_budget)
 
-    # 1. Başlık ve Tıklanabilir Link
+    # 1. Emoji ve Tıklanabilir Başlık
     builder.text(f"{emoji} ")
-    builder.link(title.upper(), page_url)
+    builder.link(cand['title'].upper(), page_url)
     builder.text("\n\n")
 
-    # 2. Gövde Metni
+    # 2. Üretilen Yoğun İngilizce Metin
     builder.text(narrative)
 
-    total_post_len = len(f"{emoji} {title.upper()}\n\n{narrative}")
+    total_post_len = len(f"{emoji} {cand['title'].upper()}\n\n{narrative}")
     print(f"Toplam Gönderi Hacmi: {total_post_len} / 300 grafem (Özet: {len(narrative)} kr)")
 
     return builder
@@ -391,31 +436,51 @@ def main():
         sys.exit(1)
 
     posted = get_posted_titles()
-    candidates = get_unusual_articles()
-    
-    if not candidates:
-        print("Aday listesi boş.")
-        return
+    posted_lower = {line.lower() for line in posted}
 
-    unposted = [c for c in candidates if c not in posted]
-    random.shuffle(unposted)
+    # 4 Kaynağı karıştır ve sırayla dene (her çalıştırmada adil dağılım)
+    sources = list(UNUSUAL_SOURCES)
+    random.shuffle(sources)
 
+    chosen_candidate = None
     target_data = None
-    for cand in unposted[:50]:
-        data = fetch_summary(cand)
-        if data and data.get("type") == "standard" and data.get("extract"):
-            target_data = data
-            print(f"Seçilen madde: {cand}")
+
+    for src in sources:
+        candidates = extract_candidates_from_source(src)
+        if not candidates:
+            continue
+
+        # Hem "lang:title" hem de doğrudan "title" olarak daha önce paylaşılmış mı kontrol et
+        unposted = [
+            c for c in candidates 
+            if f"{c['lang']}:{c['title']}".lower() not in posted_lower 
+            and c['title'].lower() not in posted_lower
+        ]
+        print(f"[{src['domain']}] Henüz paylaşılmamış aday sayısı: {len(unposted)}")
+
+        random.shuffle(unposted)
+
+        for cand in unposted[:40]:
+            data = fetch_summary(cand["domain"], cand["title"])
+            if data and data.get("type") == "standard" and data.get("extract"):
+                chosen_candidate = cand
+                target_data = data
+                print(f"Seçilen Madde: {cand['title']} ({cand['domain']})")
+                print(f"Küratör Notu: {cand['curation_note'][:120]}...")
+                break
+
+        if chosen_candidate:
             break
 
-    if not target_data:
-        print("50 aday tarandı ancak uygun içerik bulunamadı.")
+    if not chosen_candidate or not target_data:
+        print("Uygun içerikli sıra dışı madde bulunamadı.")
         return
 
-    title = target_data.get("title")
+    title = chosen_candidate["title"]
+    domain = chosen_candidate["domain"]
     extract = target_data.get("extract", "").strip()
     page_url = target_data.get("content_urls", {}).get("desktop", {}).get("page", "")
-    
+
     img_url = (
         target_data.get("originalimage", {}).get("source") or 
         target_data.get("thumbnail", {}).get("source")
@@ -426,8 +491,7 @@ def main():
 
     if img_url:
         try:
-            # Varsa maddedeki orijinal görsel açıklamasını çek
-            caption = fetch_image_caption(title, img_url)
+            caption = fetch_image_caption(domain, title, img_url)
             if caption:
                 alt_text = f"{title}: {caption}"
                 if len(alt_text) > 500:
@@ -443,7 +507,7 @@ def main():
     client = Client()
     client.login(BSKY_HANDLE, BSKY_APP_PASSWORD)
 
-    rich_text = build_post(title, extract, page_url)
+    rich_text = build_post(chosen_candidate, extract, page_url)
 
     try:
         if image_bytes:
@@ -456,7 +520,7 @@ def main():
             client.send_post(text=rich_text)
 
         print(f"Başarıyla paylaşıldı: {title}")
-        save_posted_title(title)
+        save_posted_title(f"{chosen_candidate['lang']}:{title}")
     except Exception as e:
         print(f"Bluesky paylaşım hatası: {e}")
 
