@@ -21,14 +21,14 @@ BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
 BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.8 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.9 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -411,18 +411,18 @@ def request_gemini(prompt):
         print(f"[Gemini] Bağlantı/Zaman aşımı hatası: {e}")
     return None
 
-def request_groq(prompt):
-    if not GROQ_API_KEY:
-        print("[Groq] API anahtarı (GROQ_API_KEY) tanımlı değil! Atlanıyor.")
+def request_deepseek(prompt):
+    if not DEEPSEEK_API_KEY:
+        print("[DeepSeek] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
         return None
 
-    url = clean_url("https://api.groq.com/openai/v1/chat/completions")
+    url = clean_url("https://api.deepseek.com/chat/completions")
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "qwen/qwen3.6-27b",
+        "model": "deepseek-chat",
         "messages": [
             {
                 "role": "system",
@@ -431,22 +431,22 @@ def request_groq(prompt):
             {"role": "user", "content": prompt}
         ],
         "temperature": 0.8,
-        "reasoning_effort": "none",
-        "max_tokens": 1200
+        "max_tokens": 1200,
+        "response_format": {"type": "json_object"}
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp = requests.post(url, headers=headers, json=payload, timeout=20)
         if resp.status_code == 200:
             content = resp.json()["choices"][0]["message"]["content"]
             parsed = parse_json_safely(content)
             if parsed:
                 return parsed
-            print(f"[Groq] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
+            print(f"[DeepSeek] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
         else:
-            print(f"[Groq] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
+            print(f"[DeepSeek] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
-        print(f"[Groq] Bağlantı hatası: {e}")
+        print(f"[DeepSeek] Bağlantı hatası: {e}")
     return None
 
 def validate_candidate_output(data, budget_en, budget_tr, min_en, min_tr):
@@ -480,8 +480,6 @@ def validate_candidate_output(data, budget_en, budget_tr, min_en, min_tr):
 def generate_dual_language_posts(cand, extract, budget_en, budget_tr, caption=None):
     min_en = max(120, int(budget_en * 0.45))
     min_tr = max(120, int(budget_tr * 0.45))
-    near_full_en = budget_en * 0.9
-    near_full_tr = budget_tr * 0.9
 
     caption_instruction = ""
     if caption:
@@ -517,27 +515,10 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr, caption=No
         "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\", \"alt_tr\": \"...\"} (if no caption, alt_tr can be empty)."
     )
 
-    best = None  # (emoji, n_en, n_tr, alt_tr, score, source)
-
-    def consider(emoji, n_en, n_tr, alt_tr, source):
-        nonlocal best
-        score = len(n_en) + len(n_tr)
-        if best is None or score > best[4]:
-            best = (emoji, n_en, n_tr, alt_tr, score, source)
-
-    def is_full_enough():
-        if not best:
-            return False
-        _, n_en, n_tr, _, _, _ = best
-        return len(n_en) >= near_full_en and len(n_tr) >= near_full_tr
-
     print(f"\n--- AI Üretim Süreci Başlıyor ---")
-    print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, GROQ={'Tanımlı' if GROQ_API_KEY else 'YOK'}")
+    print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, DEEPSEEK={'Tanımlı' if DEEPSEEK_API_KEY else 'YOK'}")
 
     for attempt in range(1, 4):
-        if ok:
-            break
-
         prompt = base_prompt
         if attempt > 1:
             prompt += (
@@ -546,38 +527,33 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr, caption=No
                 "fill the character budget as close to the maximum as possible, and avoid aorist tense."
             )
 
-        # 1. DENEME: ÖNCE GEMINI
+        # 1. ÖNCELİK: GEMINI
         print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 3.5 Flash] çağrılıyor...")
         data_gemini = request_gemini(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
             data_gemini, budget_en, budget_tr, min_en, min_tr
         )
         if ok:
-            print(f"[Gemini] Geçerli aday (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
-            consider(emoji, n_en, n_tr, alt_tr, "Gemini")
-            if is_full_enough():
-                break
+            print(f"[Gemini] Geçerli aday üretildi (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
+            print(f"===> Kullanılacak metin [Gemini]")
+            return emoji, n_en, n_tr, alt_tr
         else:
             print(f"[Gemini] Çıktı uygun bulunmadı ({reason}).")
 
-        # 2. DENEME: GEMINI BAŞARISIZ/YETERSİZ OLURSA GROQ'A GEÇ
-        print(f"[Deneme {attempt}/3] [2. Öncelik: Groq Qwen3.6] devreye giriyor...")
-        data_groq = request_groq(prompt)
+        # 2. ÖNCELİK: YEDEK OLARAK DEEPSEEK
+        print(f"[Deneme {attempt}/3] [2. Öncelik: DeepSeek Chat (Yedek)] devreye giriyor...")
+        data_deepseek = request_deepseek(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
-            data_groq, budget_en, budget_tr, min_en, min_tr
+            data_deepseek, budget_en, budget_tr, min_en, min_tr
         )
         if ok:
-            print(f"[Groq] Geçerli aday (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
-            consider(emoji, n_en, n_tr, alt_tr, "Groq")
+            print(f"[DeepSeek] Geçerli aday üretildi (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
+            print(f"===> Kullanılacak metin [DeepSeek]")
+            return emoji, n_en, n_tr, alt_tr
         else:
-            print(f"[Groq] Çıktı uygun bulunmadı ({reason}).")
+            print(f"[DeepSeek] Çıktı uygun bulunmadı ({reason}).")
 
-    if best:
-        emoji, n_en, n_tr, alt_tr, _score, source = best
-        print(f"\n===> Kullanılacak metin [{source}] (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
-        return emoji, n_en, n_tr, alt_tr
-
-    print("\n[UYARI] Hem Gemini hem Groq başarısız oldu. Çift dilli AI metni üretilemedi!")
+    print("\n[UYARI] Hem Gemini hem DeepSeek başarısız oldu. Çift dilli AI metni üretilemedi!")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None, None
 
 def build_post(display_title, narrative, emoji, page_url):
@@ -654,7 +630,7 @@ def main():
         page_url_tr = page_url_en
         title_tr = title_en
 
-    # Görsel ve Açıklamayı (Caption) AI işleminden önce çekiyoruz
+    # Görsel ve Açıklama Çekimi
     img_url = (
         target_data.get("originalimage", {}).get("source") or 
         target_data.get("thumbnail", {}).get("source")
@@ -677,12 +653,12 @@ def main():
     header_len_tr = len(title_tr) + 5
     budget_tr = TOTAL_BLUESKY_BUDGET - header_len_tr - 2
 
-    # Metinleri ve Türkçe alt açıklamayı (alt_tr_ai) üret
+    # Metin Üretimi
     emoji, narrative_en, narrative_tr, alt_tr_ai = generate_dual_language_posts(
         chosen_candidate, extract, budget_en, budget_tr, caption=caption
     )
 
-    # Alt metinleri hazırla: İngilizce için kaynak caption, Türkçe için AI çevirisi / yerelleştirmesi
+    # Alt Metinler
     alt_text_en = f"{title_en}: {caption}"[:495] if caption else f"{title_en} Wikipedia image"
     if alt_tr_ai:
         alt_text_tr = f"{title_tr}: {alt_tr_ai}"[:495]
