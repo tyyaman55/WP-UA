@@ -4,6 +4,7 @@ import time
 import random
 import re
 import json
+import base64
 import urllib.parse
 import requests
 from io import BytesIO
@@ -14,10 +15,18 @@ BSKY_HANDLE = os.environ.get("BSKY_HANDLE")
 BSKY_APP_PASSWORD = os.environ.get("BSKY_APP_PASSWORD")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
+GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")  # "owner/repo"
+GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
     "User-Agent": "BlueskyUnusualWikiBot/3.8 (https://bsky.app/; personal curation bot)"
+}
+
+GITHUB_API_HEADERS = {
+    "Authorization": f"Bearer {GITHUB_TOKEN}",
+    "Accept": "application/vnd.github+json"
 }
 
 TOTAL_BLUESKY_BUDGET = 300
@@ -31,14 +40,80 @@ def clean_url(raw_url):
     return match.group(0) if match else raw_url
 
 def get_posted_titles():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return set(line.strip() for line in f if line.strip())
+    """Kayıt dosyasını GitHub API üzerinden repodan okur (yarış durumlarından etkilenmez)."""
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("GITHUB_TOKEN veya GITHUB_REPOSITORY tanımlı değil, boş liste ile devam ediliyor.")
+        return set()
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
+    try:
+        resp = requests.get(url, headers=GITHUB_API_HEADERS, params={"ref": GITHUB_BRANCH}, timeout=15)
+        if resp.status_code == 200:
+            content_b64 = resp.json().get("content", "")
+            text = base64.b64decode(content_b64).decode("utf-8")
+            return set(line.strip() for line in text.splitlines() if line.strip())
+        elif resp.status_code == 404:
+            return set()
+        else:
+            print(f"Kayıt dosyası okunamadı (HTTP {resp.status_code}): {resp.text[:200]}")
+    except Exception as e:
+        print(f"Kayıt dosyası okunurken hata: {e}")
     return set()
 
-def save_posted_title(title):
-    with open(STATE_FILE, "a", encoding="utf-8") as f:
-        f.write(f"{title}\n")
+def save_posted_title(title, max_retries=5):
+    """Kayıt dosyasını GitHub Contents API ile günceller.
+
+    Her denemede güncel içerik + sha çekilir, satır eklenir ve geri yazılır.
+    SHA çakışması (başka bir çalıştırma araya girdiyse) olursa yeniden dener.
+    """
+    if not GITHUB_TOKEN or not GITHUB_REPO:
+        print("GITHUB_TOKEN veya GITHUB_REPOSITORY tanımlı değil, kayıt atlanıyor.")
+        return
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}"
+
+    for attempt in range(1, max_retries + 1):
+        current_text = ""
+        sha = None
+
+        resp = requests.get(url, headers=GITHUB_API_HEADERS, params={"ref": GITHUB_BRANCH}, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            sha = data["sha"]
+            current_text = base64.b64decode(data["content"]).decode("utf-8")
+        elif resp.status_code != 404:
+            print(f"Kayıt dosyası okunamadı (HTTP {resp.status_code}): {resp.text[:200]}")
+
+        if title in set(line.strip() for line in current_text.splitlines() if line.strip()):
+            print(f"'{title}' zaten kayıtlı, tekrar yazılmıyor.")
+            return
+
+        new_text = current_text
+        if new_text and not new_text.endswith("\n"):
+            new_text += "\n"
+        new_text += f"{title}\n"
+
+        payload = {
+            "message": "chore: update posted wiki archive [skip ci]",
+            "content": base64.b64encode(new_text.encode("utf-8")).decode("utf-8"),
+            "branch": GITHUB_BRANCH,
+        }
+        if sha:
+            payload["sha"] = sha
+
+        put_resp = requests.put(url, headers=GITHUB_API_HEADERS, json=payload, timeout=15)
+        if put_resp.status_code in (200, 201):
+            print(f"'{title}' başarıyla kaydedildi.")
+            return
+        elif put_resp.status_code in (409, 422):
+            print(f"SHA çakışması, tekrar deneniyor ({attempt}/{max_retries})...")
+            time.sleep(1.5)
+            continue
+        else:
+            print(f"Kayıt hatası (HTTP {put_resp.status_code}): {put_resp.text[:200]}")
+            return
+
+    print("Maksimum deneme sayısına ulaşıldı, kayıt başarısız oldu.")
 
 def get_unusual_articles():
     url = clean_url("https://en.wikipedia.org/w/api.php")
