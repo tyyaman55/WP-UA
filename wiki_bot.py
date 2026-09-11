@@ -20,7 +20,7 @@ BSKY_APP_PASSWORD_EN = os.environ.get("BSKY_APP_PASSWORD_EN") or os.environ.get(
 BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
 BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
 
-GEMINI_API_KEY = os.environ.get("None")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")
@@ -416,13 +416,13 @@ def request_deepseek(prompt):
         print("[DeepSeek] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
         return None
 
-    url = clean_url("https://api.deepseek.com")
+    url = clean_url("https://api.deepseek.com/chat/completions")
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-flash",
+        "model": "deepseek-chat",
         "messages": [
             {
                 "role": "system",
