@@ -384,15 +384,19 @@ def request_gemini(prompt):
         print("[Gemini] API anahtarı (GEMINI_API_KEY) tanımlı değil! Atlanıyor.")
         return None
 
-    url = clean_url(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}")
+    url = clean_url(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key={GEMINI_API_KEY}")
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
             "maxOutputTokens": 1200,
             "temperature": 0.85,
+            # Gemini 3.x modelleri artık eski "thinkingBudget" yerine
+            # "thinkingLevel" kullanıyor (MINIMAL/LOW/MEDIUM/HIGH).
+            # Bu kısa, yapılandırılmış JSON görevi için "low" hız/gecikme
+            # açısından yeterli ve isabetli.
             "thinkingConfig": {
-                "thinkingBudget": 0
+                "thinkingLevel": "low"
             }
         }
     }
@@ -453,8 +457,16 @@ def request_groq(prompt):
         print(f"[Groq] Bağlantı hatası: {e}")
     return None
 
-def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_min_tr):
-    """Çıktıyı uzunluk, noktalama ve dil kurallarına göre değerlendirir."""
+def validate_candidate_output(data, budget_en, budget_tr, min_en, min_tr):
+    """Çıktıyı dil/noktalama kurallarına göre değerlendirir; bütçeyi aşan metni kırpar.
+
+    Eskiden "hedefin son 25 karakterine kadar yaklaşmadıysa reddet" gibi çok dar
+    bir eşik vardı ve bu, LLM çıktısındaki doğal uzunluk oynaklığıyla sürekli
+    çakışıp geçerli, iyi yazılmış metinleri bile "Bütçe yetersiz" diye eliyordu.
+    Artık tek gerçek ret sebepleri: metin boş, Türkçe değil, ya da aşırı
+    noktalamalı. Uzunluğu bütçeye yaklaştırma işini validasyon değil, prompt +
+    "en iyisini biriktir" stratejisi üstleniyor (aşağıya bakın).
+    """
     if not data:
         return False, None, None, None, "Yanıt boş veya parse edilemedi"
 
@@ -465,6 +477,7 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
     if not n_en or not n_tr:
         return False, None, None, None, "Metin alanları eksik (narrative_en veya narrative_tr boş)"
 
+    # Bütçeyi aşmak bir hata değil, sadece tam cümle sonunda kırpılması gereken normal bir durum.
     if len(n_en) > budget_en:
         n_en = fit_complete_sentences(n_en, budget_en)
     if len(n_tr) > budget_tr:
@@ -476,19 +489,20 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
     if not validate_internal_punctuation(n_tr, max_internal=2):
         return False, None, None, None, "Türkçe cümlede 2'den fazla iç noktalama işareti var"
 
-    if len(n_en) < target_min_en or len(n_tr) < target_min_tr:
-        return False, None, None, None, f"Bütçe yetersiz (EN: {len(n_en)}/{target_min_en}, TR: {len(n_tr)}/{target_min_tr})"
+    if len(n_en) < min_en or len(n_tr) < min_tr:
+        return False, None, None, None, f"Metin çok kısa (EN: {len(n_en)}/{min_en}, TR: {len(n_tr)}/{min_tr})"
 
     return True, emoji, n_en, n_tr, "Kusursuz"
 
 def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
-    # Eskiden bu eşik "budget - 25" idi (ör. 258/300) ve model o son 25 karakterlik
-    # dar aralığı sık sık tutturamadığı için "Bütçe yetersiz" diyerek geçerli, iyi
-    # yazılmış metinleri bile reddediyordu. Aralık genişletildi (budget'ın ~%75'i,
-    # taban 150) ki gereksiz reddedilme/retry olmasın; buna karşın aşağıdaki prompt
-    # modeli yine de üst sınıra olabildiğince yaklaşmaya zorluyor.
-    target_min_en = max(150, int(budget_en * 0.75))
-    target_min_tr = max(150, int(budget_tr * 0.75))
+    # Mutlak minimum: kabul edilebilir bir post için gereken taban uzunluk.
+    # Bunun altı gerçekten "kullanılamaz" demektir (yarım cümle, vs.). Üst sınıra
+    # yaklaşma işi artık burada değil, aşağıdaki "en iyisini sakla" döngüsünde.
+    min_en = max(120, int(budget_en * 0.45))
+    min_tr = max(120, int(budget_tr * 0.45))
+    # Bu eşiğe ulaşan bir aday "yeterince dolu" sayılır ve döngü erken biter.
+    near_full_en = budget_en * 0.9
+    near_full_tr = budget_tr * 0.9
 
     base_prompt = (
         "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
@@ -505,9 +519,8 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "- Focus on the concrete paradox: the specific odd rule, historical accident, absurd number, or improbable turn of events.\n"
         "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n"
         "- Avoid excessive punctuation: do NOT use more than 2 mid-sentence punctuation marks (commas/dashes) in a single sentence; split into shorter sentences if needed.\n\n"
-        "LENGTH REQUIREMENTS (STRICT - MAXIMIZE LENGTH):\n"
+        "LENGTH REQUIREMENTS (MAXIMIZE LENGTH):\n"
         f"- You have a hard budget of {budget_en} characters for narrative_en and {budget_tr} characters for narrative_tr. Your goal is to get as close as possible to this exact number, ideally within the last 10-15 characters of it. Treat the budget as a target to fill, not a ceiling to avoid.\n"
-        f"- Absolute minimum (will be REJECTED if shorter): {target_min_en} characters for narrative_en, {target_min_tr} characters for narrative_tr.\n"
         "- Do NOT stop early at 150-180 characters. If your first draft is short, add another concrete detail, a number, a date, a consequence, or a sensory specific from the extract/curator note to use the remaining space - never pad with filler words or repetition.\n"
         f"- Hard Limit: Under NO condition exceed {budget_en} characters for EN and {budget_tr} characters for TR.\n"
         "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
@@ -517,64 +530,68 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\"}."
     )
 
-    last_valid_fallback = None
+    # Geçerli bulunan HER adayı burada tutuyoruz; en sonunda bütçeye en yakın
+    # (en dolu) olanı seçeceğiz. Böylece "ilk deneme mükemmel değildi" diye boşa
+    # düşen iyi metinler artık kaybolmuyor.
+    best = None  # (emoji, n_en, n_tr, toplam_uzunluk, kaynak)
+
+    def consider(emoji, n_en, n_tr, source):
+        nonlocal best
+        score = len(n_en) + len(n_tr)
+        if best is None or score > best[3]:
+            best = (emoji, n_en, n_tr, score, source)
+
+    def is_full_enough():
+        if not best:
+            return False
+        _, n_en, n_tr, _, _ = best
+        return len(n_en) >= near_full_en and len(n_tr) >= near_full_tr
 
     print(f"\n--- AI Üretim Süreci Başlıyor ---")
     print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, GROQ={'Tanımlı' if GROQ_API_KEY else 'YOK'}")
 
     for attempt in range(1, 4):
+        if is_full_enough():
+            break
+
         prompt = base_prompt
         if attempt > 1:
             prompt += (
-                "\n\nCRITICAL RETRY NOTICE: Either 'narrative_tr' was NOT written in Turkish, or a sentence had excess punctuation, "
-                "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and avoid aorist tense."
+                "\n\nCRITICAL RETRY NOTICE: The previous draft did not fill the character budget closely enough "
+                "(or had a language/punctuation issue). You MUST write 'narrative_tr' purely in TURKISH, "
+                "fill the character budget as close to the maximum as possible, and avoid aorist tense."
             )
 
         # 1. DENEME: ÖNCE GEMINI
-        print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 2.5 Flash] çağrılıyor...")
+        print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 3.5 Flash] çağrılıyor...")
         data_gemini = request_gemini(prompt)
         ok, emoji, n_en, n_tr, reason = validate_candidate_output(
-            data_gemini, budget_en, budget_tr, target_min_en, target_min_tr
+            data_gemini, budget_en, budget_tr, min_en, min_tr
         )
-
         if ok:
-            print(f"===> Başarılı! Metin GEMINI tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
-            return emoji, n_en, n_tr
+            print(f"[Gemini] Geçerli aday (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
+            consider(emoji, n_en, n_tr, "Gemini")
+            if is_full_enough():
+                break
         else:
             print(f"[Gemini] Çıktı uygun bulunmadı ({reason}).")
-            if data_gemini and is_valid_turkish(data_gemini.get("narrative_tr", "")):
-                last_valid_fallback = (
-                    data_gemini.get("emoji") or random.choice(FALLBACK_EMOJIS),
-                    data_gemini.get("narrative_en", ""),
-                    data_gemini.get("narrative_tr", ""),
-                    "Gemini (Kısmi Bütçe)"
-                )
 
-        # 2. DENEME: GEMINI BAŞARISIZ OLURSA DOĞRUDAN GROQ'A GEÇ
+        # 2. DENEME: GEMINI BAŞARISIZ/YETERSİZ OLURSA GROQ'A GEÇ
         print(f"[Deneme {attempt}/3] [2. Öncelik: Groq Qwen3.6] devreye giriyor...")
         data_groq = request_groq(prompt)
         ok, emoji, n_en, n_tr, reason = validate_candidate_output(
-            data_groq, budget_en, budget_tr, target_min_en, target_min_tr
+            data_groq, budget_en, budget_tr, min_en, min_tr
         )
-
         if ok:
-            print(f"===> Başarılı! Metin GROQ tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
-            return emoji, n_en, n_tr
+            print(f"[Groq] Geçerli aday (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
+            consider(emoji, n_en, n_tr, "Groq")
         else:
             print(f"[Groq] Çıktı uygun bulunmadı ({reason}).")
-            if data_groq and is_valid_turkish(data_groq.get("narrative_tr", "")):
-                last_valid_fallback = (
-                    data_groq.get("emoji") or random.choice(FALLBACK_EMOJIS),
-                    data_groq.get("narrative_en", ""),
-                    data_groq.get("narrative_tr", ""),
-                    "Groq (Kısmi Bütçe)"
-                )
 
-    # 3 Deneme sonunda tam bütçe tutturulamadıysa fakat geçerli Türkçe üretildiyse onu kurtar
-    if last_valid_fallback:
-        em, en_cand, tr_cand, provider = last_valid_fallback
-        print(f"\n===> Tam bütçeye ulaşılamadı fakat geçerli Türkçe metin kurtarıldı [{provider}] (EN: {len(en_cand)} kr, TR: {len(tr_cand)} kr).")
-        return em, fit_complete_sentences(en_cand, budget_en), fit_complete_sentences(tr_cand, budget_tr)
+    if best:
+        emoji, n_en, n_tr, _score, source = best
+        print(f"\n===> Kullanılacak metin [{source}] (EN: {len(n_en)}/{budget_en} kr, TR: {len(n_tr)}/{budget_tr} kr).")
+        return emoji, n_en, n_tr
 
     print("\n[UYARI] Hem Gemini hem Groq başarısız oldu. Çift dilli AI metni üretilemedi!")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None
