@@ -60,3 +60,4 @@ en:Ugly stick
 en:L. W. Wright
 en:1593 transported soldier legend
 en:Shibboleth
+en:Alarmo
