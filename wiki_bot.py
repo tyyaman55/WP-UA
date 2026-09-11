@@ -22,7 +22,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/4.1 (https://bsky.app/; curated unusual articles bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/4.2 (https://bsky.app/; curated unusual articles bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -33,7 +33,6 @@ GITHUB_API_HEADERS = {
 TOTAL_BLUESKY_BUDGET = 300
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
 
-# YALNIZCA BU 4 RESMİ LİSTE KULLANILIR
 UNUSUAL_SOURCES = [
     {
         "lang": "en",
@@ -64,7 +63,6 @@ def clean_url(raw_url):
     return match.group(0) if match else raw_url
 
 def get_posted_titles():
-    """Kayıt dosyasını doğrudan GitHub API üzerinden okur."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return set()
 
@@ -80,13 +78,11 @@ def get_posted_titles():
     return set()
 
 def is_already_posted(cand, posted_lower_set):
-    """Maddenin daha önce paylaşılıp paylaşılmadığını teyit eder."""
     raw_title_lower = cand["title"].lower()
     prefixed_key_lower = f"{cand['lang']}:{cand['title']}".lower()
     return (raw_title_lower in posted_lower_set or prefixed_key_lower in posted_lower_set)
 
 def save_posted_title(record_key, max_retries=5):
-    """Kayıt dosyasına yeni maddeyi GitHub Contents API ile ekler."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return
 
@@ -129,7 +125,6 @@ def save_posted_title(record_key, max_retries=5):
             return
 
 def extract_candidates_from_source(source):
-    """Listeden hem madde başlığını hem de küratörün 'unusual' açıklama notunu çeker."""
     domain = source["domain"]
     page = source["page"]
     lang = source["lang"]
@@ -307,7 +302,7 @@ def request_gemini(prompt):
         "generationConfig": {
             "response_mime_type": "application/json",
             "maxOutputTokens": 800,
-            "temperature": 0.75,
+            "temperature": 0.85,
             "thinkingConfig": {
                 "thinkingBudget": 0
             }
@@ -315,7 +310,6 @@ def request_gemini(prompt):
     }
 
     try:
-        print("Gemini 2.5 Flash çağrılıyor...")
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code == 200:
             candidates = resp.json().get("candidates", [])
@@ -344,17 +338,16 @@ def request_groq(prompt):
         "messages": [
             {
                 "role": "system",
-                "content": "You always respond with a single valid JSON object and nothing else — no markdown fences, no commentary before or after it."
+                "content": "You always respond with a single valid JSON object and nothing else — no markdown fences, no commentary."
             },
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.75,
+        "temperature": 0.8,
         "reasoning_effort": "none",
         "max_tokens": 900
     }
 
     try:
-        print("Groq API devreye giriyor (Qwen3.6 27B)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             content = resp.json()["choices"][0]["message"]["content"]
@@ -366,49 +359,64 @@ def request_groq(prompt):
     return None
 
 def generate_ai_curated_post(cand, extract, available_budget):
-    target_min = max(available_budget - 18, int(available_budget * 0.92))
+    # Modelin metni kısa kesmesini engellemek için agresif alt limit
+    target_min = max(200, available_budget - 25)
 
-    prompt = (
-        "You are the curator of a popular Bluesky account that uncovers extraordinary, bizarre, and fascinating Wikipedia rabbit holes.\n"
+    base_prompt = (
+        "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
         f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
         f"Article Title: {cand['title']}\n"
-        f"Curator's List Annotation (EXPLAINS WHY IT IS UNUSUAL): {cand['curation_note']}\n"
-        f"Article Lead Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
-        "TASK:\n"
-        "1. Identify specifically WHAT makes this subject bizarre, unusual, or remarkable using both the Curator's Annotation and the Article Extract.\n"
-        "2. Write an intriguing, curiosity-provoking micro-narrative in ENGLISH built strictly around that unusual aspect.\n\n"
-        "TONE & STYLE GUIDELINES:\n"
-        "- The output narrative MUST BE 100% IN ENGLISH, regardless of the source language (German, French, Spanish, or English).\n"
-        "- Intriguing and captivating, never dry or boring. Spark deep curiosity in the reader.\n"
-        "- Respectful and grounded storytelling: NOT flippant, NOT disrespectful, and NOT slangy ('laubali olmadan').\n"
-        "- Avoid cheap hype or formulaic hooks like 'Imagine', 'Picture this', 'Meet', 'You won't believe', or 'Insane'. Present the strange reality directly with authentic punch.\n"
-        "- Weave in concrete details (names, dates, numbers, odd legal rules, or peculiar events).\n\n"
-        "STRICT LENGTH CONSTRAINTS:\n"
-        f"- Target Length: MUST be between {target_min} and {available_budget} characters. Maximize the character budget!\n"
-        f"- Absolute Maximum: Under NO circumstances exceed {available_budget} characters.\n"
-        "- MUST end with a complete, fully punctuated sentence (. ! or ?). Never cut off mid-thought.\n"
-        "- Do not repeat or begin with the article title.\n"
-        "- No hashtags, no markdown, no links.\n"
-        "- Select ONE fitting emoji for the story.\n"
-        "- Output strictly a single JSON object: {\"emoji\": \"...\", \"narrative\": \"...\"}."
+        f"Curator Note (WHY IT IS UNUSUAL): {cand['curation_note']}\n"
+        f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
+        "GOAL:\n"
+        "Craft a compelling 2 to 3-sentence micro-narrative in ENGLISH that hooks the reader with the sheer bizarre irony of this story.\n\n"
+        "TONE & STYLE (CRITICAL):\n"
+        "- Write with an intriguing, curious narrative voice with a subtle touch of dry, intelligent mischief (playful curiosity without being disrespectful or silly).\n"
+        "- Do NOT write a dry textbook summary. Avoid formal encyclopedic passive phrasing (e.g. 'It is known as...', 'This article describes...').\n"
+        "- Focus on the concrete paradox: the specific odd rule, historical accident, absurd number, or improbable turn of events.\n"
+        "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n\n"
+        "LENGTH REQUIREMENTS (STRICT):\n"
+        f"- Target Range: MUST be between {target_min} and {available_budget} characters. Do NOT stop early at 150-180 characters. Fill the available budget with vivid details!\n"
+        f"- Hard Limit: Under NO condition exceed {available_budget} characters.\n"
+        "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
+        "- Do not repeat or start with the article title.\n"
+        "- No hashtags, no markdown formatting.\n"
+        "- Select ONE matching emoji.\n"
+        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative\": \"...\"}."
     )
 
-    data = None
-    if GEMINI_API_KEY:
-        data = request_gemini(prompt)
+    # En fazla 3 deneme: Metin kısa kesilirse döngüye girip tekrar zorlar
+    for attempt in range(1, 4):
+        current_prompt = base_prompt
+        if attempt > 1:
+            current_prompt += (
+                f"\n\nCRITICAL RETRY NOTICE: Your previous output was way too short! "
+                f"You MUST expand your narrative with more vivid historical or situational context to reach between {target_min} and {available_budget} characters."
+            )
 
-    if not data and GROQ_API_KEY:
-        data = request_groq(prompt)
+        data = None
+        if GEMINI_API_KEY:
+            data = request_gemini(current_prompt)
+        if not data and GROQ_API_KEY:
+            data = request_groq(current_prompt)
 
-    if data:
-        emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
-        narrative = data.get("narrative", "").strip()
-        if narrative:
-            if len(narrative) > available_budget:
-                narrative = fit_complete_sentences(narrative, available_budget)
-            return emoji, narrative
+        if data:
+            emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
+            narrative = data.get("narrative", "").strip()
 
-    print("Yapay zeka yanıt vermedi, acil durum metin kesimine geçiliyor.")
+            if narrative:
+                # Bütçeyi aştıysa tam cümle hizala
+                if len(narrative) > available_budget:
+                    narrative = fit_complete_sentences(narrative, available_budget)
+
+                # Karakter kontrolü: Yeterli dolgunluktaysa veya son denemedeyse kabul et
+                if len(narrative) >= target_min or attempt == 3:
+                    print(f"Yapay zeka metni kabul edildi ({len(narrative)} / {available_budget} kr, Deneme {attempt}):\n{narrative}")
+                    return emoji, narrative
+
+                print(f"Metin kısa kaldı ({len(narrative)} kr < hedef {target_min} kr). Yeniden deneniyor ({attempt}/3)...")
+
+    print("Yapay zeka yanıt vermedi veya yetersiz kaldı, acil durum metnine geçiliyor.")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, available_budget)
 
 def build_post(cand, extract, page_url):
@@ -420,12 +428,12 @@ def build_post(cand, extract, page_url):
 
     emoji, narrative = generate_ai_curated_post(cand, extract, available_narrative_budget)
 
-    # 1. Emoji ve Tıklanabilir Başlık
+    # 1. Emoji ve Başlık
     builder.text(f"{emoji} ")
     builder.link(cand['title'].upper(), page_url)
     builder.text("\n\n")
 
-    # 2. Üretilen Yoğun İngilizce Metin
+    # 2. Üretilen Dolgun Metin
     builder.text(narrative)
 
     total_post_len = len(f"{emoji} {cand['title'].upper()}\n\n{narrative}")
@@ -447,7 +455,7 @@ def main():
     chosen_candidate = None
     target_data = None
 
-    # 1. ÖNCELİK: ENWIKI KONTROLÜ
+    # 1. ÖNCELİK: ENWIKI
     print("Öncelik kontrolü: ENWIKI maddeleri taranıyor...")
     en_candidates = extract_candidates_from_source(en_source)
     en_unposted = [c for c in en_candidates if not is_already_posted(c, posted_lower)]
@@ -464,7 +472,7 @@ def main():
                 print(f"Küratör Notu: {cand['curation_note'][:120]}...")
                 break
 
-    # 2. ÖNCELİK: ENWIKI BİTMİŞSE DİĞER DİLLER RASTGELE DEVREYE GİRER
+    # 2. ÖNCELİK: ENWIKI BİTERSE DİĞERLERİ
     if not chosen_candidate:
         if not en_unposted:
             print("ENWIKI sıra dışı maddeleri tükendi! Diğer diller (DE, ES, FR) rastgele taranıyor...")
