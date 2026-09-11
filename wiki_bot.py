@@ -293,11 +293,12 @@ def request_groq(prompt):
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
         "temperature": 0.75,
-        "max_tokens": 400
+        "reasoning_effort": "low",
+        "max_tokens": 1024
     }
 
     try:
-        print("Groq API devreye giriyor (Llama 3.3 70B)...")
+        print("Groq API devreye giriyor (GPT-OSS 120B)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             result = resp.json()
