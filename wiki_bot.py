@@ -22,7 +22,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/4.0 (https://bsky.app/; curated unusual articles bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/4.1 (https://bsky.app/; curated unusual articles bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -78,6 +78,12 @@ def get_posted_titles():
     except Exception as e:
         print(f"Kayıt dosyası okunurken hata: {e}")
     return set()
+
+def is_already_posted(cand, posted_lower_set):
+    """Maddenin daha önce paylaşılıp paylaşılmadığını teyit eder."""
+    raw_title_lower = cand["title"].lower()
+    prefixed_key_lower = f"{cand['lang']}:{cand['title']}".lower()
+    return (raw_title_lower in posted_lower_set or prefixed_key_lower in posted_lower_set)
 
 def save_posted_title(record_key, max_retries=5):
     """Kayıt dosyasına yeni maddeyi GitHub Contents API ile ekler."""
@@ -156,7 +162,6 @@ def extract_candidates_from_source(source):
 
         candidates = []
         for li in li_blocks:
-            # İlk geçerli madde linkini yakala
             links = re.findall(r'<a\s+[^>]*href=["\']/wiki/([^"#?:]+)["\'][^>]*>(.*?)</a>', li, flags=re.DOTALL | re.IGNORECASE)
             if not links:
                 continue
@@ -177,12 +182,10 @@ def extract_candidates_from_source(source):
             if not target_title:
                 continue
 
-            # HTML etiketlerini temizleyip küratörün orijinal açıklama notunu al
             clean_note = re.sub(r'<[^>]+>', ' ', li)
             clean_note = re.sub(r'\s+', ' ', clean_note).strip()
             clean_note = html.unescape(clean_note)
 
-            # Yeterli uzunlukta açıklama notu barındıran maddeleri kabul et
             if len(clean_note) < 25:
                 continue
 
@@ -193,7 +196,7 @@ def extract_candidates_from_source(source):
                 "curation_note": clean_note
             })
 
-        print(f"[{domain}] İncelenen maddelerden {len(candidates)} adet sıra dışı aday toplandı.")
+        print(f"[{domain}] Listeden {len(candidates)} adet sıra dışı madde ayıklandı.")
         return candidates
     except Exception as e:
         print(f"Kaynak okuma hatası ({domain}): {e}")
@@ -438,39 +441,54 @@ def main():
     posted = get_posted_titles()
     posted_lower = {line.lower() for line in posted}
 
-    # 4 Kaynağı karıştır ve sırayla dene (her çalıştırmada adil dağılım)
-    sources = list(UNUSUAL_SOURCES)
-    random.shuffle(sources)
+    en_source = next(s for s in UNUSUAL_SOURCES if s["lang"] == "en")
+    other_sources = [s for s in UNUSUAL_SOURCES if s["lang"] != "en"]
 
     chosen_candidate = None
     target_data = None
 
-    for src in sources:
-        candidates = extract_candidates_from_source(src)
-        if not candidates:
-            continue
+    # 1. ÖNCELİK: ENWIKI KONTROLÜ
+    print("Öncelik kontrolü: ENWIKI maddeleri taranıyor...")
+    en_candidates = extract_candidates_from_source(en_source)
+    en_unposted = [c for c in en_candidates if not is_already_posted(c, posted_lower)]
+    print(f"[en.wikipedia.org] Henüz paylaşılmamış ENWIKI aday sayısı: {len(en_unposted)}")
 
-        # Hem "lang:title" hem de doğrudan "title" olarak daha önce paylaşılmış mı kontrol et
-        unposted = [
-            c for c in candidates 
-            if f"{c['lang']}:{c['title']}".lower() not in posted_lower 
-            and c['title'].lower() not in posted_lower
-        ]
-        print(f"[{src['domain']}] Henüz paylaşılmamış aday sayısı: {len(unposted)}")
-
-        random.shuffle(unposted)
-
-        for cand in unposted[:40]:
+    if en_unposted:
+        random.shuffle(en_unposted)
+        for cand in en_unposted[:50]:
             data = fetch_summary(cand["domain"], cand["title"])
             if data and data.get("type") == "standard" and data.get("extract"):
                 chosen_candidate = cand
                 target_data = data
-                print(f"Seçilen Madde: {cand['title']} ({cand['domain']})")
+                print(f"ENWIKI'den Seçilen Madde: {cand['title']}")
                 print(f"Küratör Notu: {cand['curation_note'][:120]}...")
                 break
 
-        if chosen_candidate:
-            break
+    # 2. ÖNCELİK: ENWIKI BİTMİŞSE DİĞER DİLLER RASTGELE DEVREYE GİRER
+    if not chosen_candidate:
+        if not en_unposted:
+            print("ENWIKI sıra dışı maddeleri tükendi! Diğer diller (DE, ES, FR) rastgele taranıyor...")
+        else:
+            print("ENWIKI adaylarından veri alınamadı, yedek dillere geçiliyor...")
+
+        random.shuffle(other_sources)
+        for src in other_sources:
+            candidates = extract_candidates_from_source(src)
+            unposted = [c for c in candidates if not is_already_posted(c, posted_lower)]
+            print(f"[{src['domain']}] Henüz paylaşılmamış aday sayısı: {len(unposted)}")
+
+            random.shuffle(unposted)
+            for cand in unposted[:40]:
+                data = fetch_summary(cand["domain"], cand["title"])
+                if data and data.get("type") == "standard" and data.get("extract"):
+                    chosen_candidate = cand
+                    target_data = data
+                    print(f"Yedek Dilden Seçilen Madde: {cand['title']} ({cand['domain']})")
+                    print(f"Küratör Notu: {cand['curation_note'][:120]}...")
+                    break
+
+            if chosen_candidate:
+                break
 
     if not chosen_candidate or not target_data:
         print("Uygun içerikli sıra dışı madde bulunamadı.")
