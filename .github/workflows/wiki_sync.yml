@@ -2,7 +2,6 @@ name: Wikipedia Bot to Bluesky
 
 on:
   schedule:
-    # TSİ 09.06 (UTC 06.06)
     - cron: '6 6 * * *'
   workflow_dispatch:
 
@@ -37,24 +36,24 @@ jobs:
           BSKY_TR_HANDLE: ${{ secrets.BSKY_TR_HANDLE }}
           BSKY_TR_APP_PASSWORD: ${{ secrets.BSKY_TR_APP_PASSWORD }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python wiki_bot.py
 
-      - name: Hata Bildirimi
+      - name: Hata Bildirimi (Otomatik Issue Aç)
         if: failure()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          ERROR_DETAILS="İş akışı beklenmedik şekilde kesintiye uğradı."
+          ERROR_DETAILS="İş akışı adımı beklenmedik şekilde kesintiye uğradı."
           if [ -f error_summary.txt ]; then
             ERROR_DETAILS=$(cat error_summary.txt)
           fi
 
           gh issue create \
-            --title "🚨 Vikipedi Bot Çalışma Hatası ($(date +'%Y-%m-%d %H:%M UTC'))" \
+            --title "🚨 Wikipedia Bot Çalışma Hatası ($(date +'%Y-%m-%d %H:%M UTC'))" \
             --body "### ⚠️ Bot Çalıştırma Hatası
 
           Bot çalıştırma adımı başarısız oldu ve paylaşım yapılamadı.
@@ -65,4 +64,4 @@ jobs:
           \`\`\`
 
           **İş Akışı Kayıtları:**
-          Ayrıntılı hata günlüklerini incelemek için [buraya tıklayın](${RUN_URL})." || true
+          Ayrıntılı hata loglarını incelemek için [buraya tıklayın](${RUN_URL})." || true
