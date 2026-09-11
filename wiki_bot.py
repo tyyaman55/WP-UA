@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/6.2 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/6.3 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -379,7 +379,6 @@ def is_valid_turkish(text):
     return len(words.intersection(tr_stopwords)) >= 2
 
 def parse_json_safely(raw_str):
-    """LLM çıktısından JSON nesnesini hatasız ayıklar."""
     if not raw_str or not isinstance(raw_str, str):
         return None
 
@@ -388,13 +387,11 @@ def parse_json_safely(raw_str):
     clean = re.sub(r'\s*```$', '', clean)
     clean = clean.strip()
 
-    # 1. Doğrudan deneme (strict=False kontrol karakterlerini tolere eder)
     try:
         return json.loads(clean, strict=False)
     except Exception:
         pass
 
-    # 2. İlk { ile son } arasını ayıkla
     start = clean.find('{')
     end = clean.rfind('}')
     if start != -1 and end != -1 and end > start:
@@ -402,7 +399,6 @@ def parse_json_safely(raw_str):
         try:
             return json.loads(snippet, strict=False)
         except Exception:
-            # Trailing comma (sondaki fazla virgül) temizliği
             fixed = re.sub(r',\s*([}\]])', r'\1', snippet)
             try:
                 return json.loads(fixed, strict=False)
@@ -447,6 +443,7 @@ def request_gemini(prompt):
     return None
 
 def request_deepseek(prompt):
+    """DeepSeek resmi API spesifikasyonuna (JSON mode & pricing/docs) tam uyumlu çağrı."""
     if not DEEPSEEK_API_KEY:
         print("[DeepSeek-V3] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
         return None
@@ -456,17 +453,21 @@ def request_deepseek(prompt):
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
-    # "response_format": {"type": "json_object"} boş string ("") dönme hatasına yol açtığı için kaldırıldı.
+
+    # DeepSeek JSON Mode kuralı: Prompt/Messages içinde mutlaka açıkça 'json' kelimesi geçmelidir.
     payload = {
         "model": "deepseek-chat",
         "messages": [
             {
                 "role": "system",
-                "content": "You are a specialized curator bot. You MUST ALWAYS output ONLY a single valid raw JSON object. Do not include markdown formatting, code block fences, or any commentary."
+                "content": "You are a specialized curator bot designed to output JSON. You must ALWAYS output a single valid raw JSON object matching the requested schema. No conversational filler."
             },
             {"role": "user", "content": prompt}
         ],
-        "temperature": 0.75,
+        "response_format": {
+            "type": "json_object"
+        },
+        "temperature": 0.7,
         "max_tokens": 1200
     }
 
@@ -475,15 +476,14 @@ def request_deepseek(prompt):
         if resp.status_code == 200:
             choices = resp.json().get("choices", [])
             if choices:
-                message = choices[0].get("message", {})
-                content = message.get("content", "") or message.get("reasoning_content", "") or ""
-                if content.strip():
+                content = choices[0].get("message", {}).get("content", "")
+                if content and content.strip():
                     parsed = parse_json_safely(content)
                     if parsed:
                         return parsed
-                    print(f"[DeepSeek-V3] JSON çözülemedi. Ham içerik: {repr(content[:250])}")
+                    print(f"[DeepSeek-V3] JSON parse edilemedi. Ham içerik: {repr(content[:250])}")
                 else:
-                    print(f"[DeepSeek-V3] Model boş içerik döndürdü. Detay: {choices[0]}")
+                    print(f"[DeepSeek-V3] Boş içerik döndü: {choices[0]}")
             else:
                 print(f"[DeepSeek-V3] choices dizisi boş döndü.")
         else:
@@ -521,7 +521,6 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
     return True, emoji, n_en, n_tr, alt_tr, "Kusursuz"
 
 def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
-    # Gerçekçi ve dolgun hedef bütçe (gereksiz reddedilmeleri engeller)
     target_min_en = max(190, budget_en - 55)
     target_min_tr = max(190, budget_tr - 55)
 
@@ -551,7 +550,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
         "- Do not repeat or start with the article title.\n"
         "- No hashtags, no markdown formatting.\n"
         "- Select ONE matching emoji.\n"
-        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\", \"alt_tr\": \"...\"}."
+        "- Respond strictly with a single JSON object containing keys: emoji, narrative_en, narrative_tr, alt_tr."
     )
 
     last_valid_fallback = None
@@ -564,7 +563,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
         if attempt > 1:
             prompt += (
                 "\n\nCRITICAL RETRY NOTICE: Either 'narrative_tr' was NOT written in Turkish, or a sentence had excess punctuation, "
-                "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and avoid aorist tense."
+                "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and output pure JSON."
             )
 
         # 1. ÖNCELİK: GEMINI
