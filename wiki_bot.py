@@ -36,6 +36,8 @@ GITHUB_API_HEADERS = {
     "Accept": "application/vnd.github+json"
 }
 
+GEMINI_QUOTA_EXHAUSTED = False  # 429 alındığında True olur; aynı çalıştırmada Gemini'yi tekrar tekrar denemeyi (ve zaman kaybetmeyi) engeller
+
 TOTAL_BLUESKY_BUDGET = 300
 MAX_BLOB_IMAGE_SIZE = 950_000
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
@@ -378,6 +380,72 @@ def is_valid_turkish(text):
     words = set(re.findall(r'\b[a-zA-ZçğıöşüÇĞİÖŞÜ]+\b', text.lower()))
     return len(words.intersection(tr_stopwords)) >= 2
 
+def _find_balanced_json_span(text, start):
+    """
+    '{' karakterinden başlayarak, string içindeki (tırnaklı) süslü parantezleri
+    saymadan, dengeyi karakter karakter takip ederek gerçek kapanış '}' konumunu
+    bulur. Naif str.rfind('}') yaklaşımı, metin içeriğinde (narrative alanlarında)
+    geçen '}' karakterlerinde veya kod bloğu kalıntılarında yanılabiliyordu; bu
+    tarayıcı JSON söz dizimini (tırnak/escape farkında) gerçekten takip eder.
+    Dengeli bir kapanış bulunursa (start, end) döner; bulunamazsa (kesilmiş
+    yanıt durumu) end=None döner.
+    """
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == '\\':
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    return start, i
+    return start, None
+
+def _extract_fields_via_regex(text):
+    """
+    Son çare: JSON tamamen bozuk/kesilmişse bile, beklenen alanları doğrudan
+    metin üzerinden regex ile çekmeyi dener (kısmi kurtarma). Bulunan alanlar
+    kadarıyla bir sözlük döner; hiçbir alan bulunamazsa None döner.
+    """
+    result = {}
+    patterns = {
+        "emoji": r'"emoji"\s*:\s*"(.*?)(?<!\\)"',
+        "narrative_en": r'"narrative_en"\s*:\s*"(.*?)(?<!\\)"',
+        "narrative_tr": r'"narrative_tr"\s*:\s*"(.*?)(?<!\\)"',
+        "alt_tr": r'"alt_tr"\s*:\s*"(.*?)(?<!\\)"',
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, text, flags=re.DOTALL)
+        if m:
+            val = m.group(1)
+            val = val.replace('\\"', '"').replace('\\n', ' ').replace('\\\\', '\\')
+            result[key] = val.strip()
+
+    # narrative_tr kesik kalmış olabilir (kapanış tırnağı hiç gelmemiş).
+    # Bu durumda alanı, en azından tamamlanmış cümlelere kadar kurtarmayı dene.
+    if "narrative_tr" not in result:
+        m = re.search(r'"narrative_tr"\s*:\s*"(.*)$', text, flags=re.DOTALL)
+        if m:
+            val = m.group(1)
+            val = re.sub(r'"\s*,?\s*"?\w*"?\s*:?\s*$', '', val)
+            val = val.replace('\\"', '"').replace('\\n', ' ').replace('\\\\', '\\')
+            if val.strip():
+                result["narrative_tr"] = val.strip()
+
+    return result if result.get("narrative_en") or result.get("narrative_tr") else None
+
 def parse_json_safely(raw_str):
     if not raw_str or not isinstance(raw_str, str):
         return None
@@ -387,15 +455,21 @@ def parse_json_safely(raw_str):
     clean = re.sub(r'\s*```$', '', clean)
     clean = clean.strip()
 
+    # 1) Doğrudan dene (en yaygın, temiz durum)
     try:
         return json.loads(clean, strict=False)
     except Exception:
         pass
 
     start = clean.find('{')
-    end = clean.rfind('}')
-    if start != -1 and end != -1 and end > start:
-        snippet = clean[start:end+1]
+    if start == -1:
+        # Hiç '{' yoksa JSON değil; yine de alanları kurtarmayı dene.
+        return _extract_fields_via_regex(clean)
+
+    # 2) Tırnak/escape farkında dengeli parantez taraması ile gerçek span'i bul
+    span_start, span_end = _find_balanced_json_span(clean, start)
+    if span_end is not None:
+        snippet = clean[span_start:span_end + 1]
         try:
             return json.loads(snippet, strict=False)
         except Exception:
@@ -405,25 +479,37 @@ def parse_json_safely(raw_str):
             except Exception:
                 pass
 
-    # Son çare: yanıt max_tokens sınırına takılıp ortasından kesilmiş olabilir
-    # (kapanış '}' hiç gelmemiş demektir). Açık kalan tırnak/parantezleri
-    # kapatıp tekrar denenir; başarısız olursa None döner.
-    if start != -1:
-        repaired = clean[start:]
-        if repaired.count('"') % 2 == 1:
-            repaired += '"'
-        open_braces = repaired.count('{') - repaired.count('}')
-        repaired += '}' * max(open_braces, 0)
-        try:
-            return json.loads(repaired, strict=False)
-        except Exception:
-            pass
+    # 3) Yanıt max_tokens sınırına takılıp ortasından kesilmiş olabilir
+    # (dengeli bir kapanış hiç bulunamadı). Açık kalan tırnağı/parantezleri
+    # kapatıp tekrar dene.
+    repaired = clean[start:]
+    if repaired.count('"') % 2 == 1:
+        repaired += '"'
+    open_braces = repaired.count('{') - repaired.count('}')
+    repaired += '}' * max(open_braces, 0)
+    try:
+        return json.loads(repaired, strict=False)
+    except Exception:
+        pass
 
-    return None
+    fixed_repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
+    try:
+        return json.loads(fixed_repaired, strict=False)
+    except Exception:
+        pass
+
+    # 4) Son çare: JSON hâlâ çözülemiyorsa, ham metinden alanları regex ile kurtar.
+    return _extract_fields_via_regex(clean)
 
 def request_gemini(prompt):
+    global GEMINI_QUOTA_EXHAUSTED
+
     if not GEMINI_API_KEY:
         print("[Gemini] API anahtarı (GEMINI_API_KEY) tanımlı değil! Atlanıyor.")
+        return None
+
+    if GEMINI_QUOTA_EXHAUSTED:
+        print("[Gemini] Bu çalıştırmada kota daha önce tükendi (429), tekrar denenmiyor.")
         return None
 
     url = clean_url(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}")
@@ -431,7 +517,7 @@ def request_gemini(prompt):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "maxOutputTokens": 1200,
+            "maxOutputTokens": 2048,
             "temperature": 0.85,
             "thinkingConfig": {
                 "thinkingBudget": 0
@@ -442,15 +528,24 @@ def request_gemini(prompt):
     try:
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code == 200:
-            candidates = resp.json().get("candidates", [])
+            data = resp.json()
+            candidates = data.get("candidates", [])
             if candidates:
+                finish_reason = candidates[0].get("finishReason")
                 parts = candidates[0].get("content", {}).get("parts", [])
                 for part in parts:
                     if "text" in part and part["text"].strip():
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-            print(f"[Gemini] Yanıt alındı ancak beklenen JSON çözülemedi.")
+                        if finish_reason == "MAX_TOKENS":
+                            print("[Gemini] Çıktı maxOutputTokens sınırında kesildi (finishReason=MAX_TOKENS), JSON tamamlanamadı.")
+                        print(f"[Gemini] Yanıt alındı ancak beklenen JSON çözülemedi. Ham içerik: {repr(part['text'][:800])}")
+                        return None
+            print(f"[Gemini] Yanıt alındı ancak içerik/candidate boş döndü: {repr(str(data)[:500])}")
+        elif resp.status_code == 429:
+            GEMINI_QUOTA_EXHAUSTED = True
+            print(f"[Gemini] HTTP 429 (kota aşıldı) — bu çalıştırmada Gemini artık denenmeyecek. Detay: {resp.text[:300]}")
         else:
             print(f"[Gemini] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
@@ -483,7 +578,7 @@ def request_deepseek(prompt):
             "type": "json_object"
         },
         "temperature": 0.7,
-        "max_tokens": 3000
+        "max_tokens": 4096
     }
 
     try:
