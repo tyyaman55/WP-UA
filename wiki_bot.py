@@ -404,6 +404,21 @@ def parse_json_safely(raw_str):
                 return json.loads(fixed, strict=False)
             except Exception:
                 pass
+
+    # Son çare: yanıt max_tokens sınırına takılıp ortasından kesilmiş olabilir
+    # (kapanış '}' hiç gelmemiş demektir). Açık kalan tırnak/parantezleri
+    # kapatıp tekrar denenir; başarısız olursa None döner.
+    if start != -1:
+        repaired = clean[start:]
+        if repaired.count('"') % 2 == 1:
+            repaired += '"'
+        open_braces = repaired.count('{') - repaired.count('}')
+        repaired += '}' * max(open_braces, 0)
+        try:
+            return json.loads(repaired, strict=False)
+        except Exception:
+            pass
+
     return None
 
 def request_gemini(prompt):
@@ -468,7 +483,7 @@ def request_deepseek(prompt):
             "type": "json_object"
         },
         "temperature": 0.7,
-        "max_tokens": 1200
+        "max_tokens": 3000
     }
 
     try:
@@ -476,14 +491,17 @@ def request_deepseek(prompt):
         if resp.status_code == 200:
             choices = resp.json().get("choices", [])
             if choices:
+                finish_reason = choices[0].get("finish_reason")
                 content = choices[0].get("message", {}).get("content", "")
                 if content and content.strip():
                     parsed = parse_json_safely(content)
                     if parsed:
                         return parsed
-                    print(f"[DeepSeek-V3] JSON parse edilemedi. Ham içerik: {repr(content[:250])}")
+                    if finish_reason == "length":
+                        print(f"[DeepSeek-V3] Çıktı max_tokens sınırında kesildi (finish_reason=length), JSON tamamlanamadı.")
+                    print(f"[DeepSeek-V3] JSON parse edilemedi. Ham içerik: {repr(content[:800])}")
                 else:
-                    print(f"[DeepSeek-V3] Boş içerik döndü: {choices[0]}")
+                    print(f"[DeepSeek-V3] Boş içerik döndü (finish_reason={finish_reason}): {choices[0]}")
             else:
                 print(f"[DeepSeek-V3] choices dizisi boş döndü.")
         else:
