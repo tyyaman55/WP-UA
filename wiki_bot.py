@@ -389,14 +389,17 @@ def request_gemini(prompt):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "maxOutputTokens": 1200,
+            # Gemini 3.x'te "thinking" token'ları da maxOutputTokens bütçesinden
+            # düşülüyor. "low" seviyesinde bile bir kısım tokenı iç muhakemeye
+            # gidip asıl JSON cevabını yarıda (kapanmamış parantezle) kesiyordu
+            # - "beklenen JSON formatı çözülemedi" hatasının asıl sebebi buydu.
+            # Bu basit, yapılandırılmış çıktı görevi derin muhakeme gerektirmediği
+            # için "minimal" (eski thinkingBudget:0'a en yakın karşılık) kullanılıyor,
+            # ayrıca payı da yükselttik.
+            "maxOutputTokens": 2048,
             "temperature": 0.85,
-            # Gemini 3.x modelleri artık eski "thinkingBudget" yerine
-            # "thinkingLevel" kullanıyor (MINIMAL/LOW/MEDIUM/HIGH).
-            # Bu kısa, yapılandırılmış JSON görevi için "low" hız/gecikme
-            # açısından yeterli ve isabetli.
             "thinkingConfig": {
-                "thinkingLevel": "low"
+                "thinkingLevel": "minimal"
             }
         }
     }
@@ -404,15 +407,25 @@ def request_gemini(prompt):
     try:
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code == 200:
-            candidates = resp.json().get("candidates", [])
+            body = resp.json()
+            candidates = body.get("candidates", [])
             if candidates:
+                finish_reason = candidates[0].get("finishReason", "")
                 parts = candidates[0].get("content", {}).get("parts", [])
                 for part in parts:
                     if "text" in part and part["text"].strip():
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-            print(f"[Gemini] Yanıt alındı ancak beklenen JSON formatı çözülemedi.")
+                # Buraya geldiyse JSON çözülemedi: teşhis için sebebi ve ham metnin
+                # bir kısmını yazdır (ör. finishReason=MAX_TOKENS demek, yanıt
+                # bütçe/limit yüzünden yarıda kesildi demektir).
+                raw_preview = " ".join(p.get("text", "") for p in parts)[:300]
+                print(f"[Gemini] Yanıt alındı ancak beklenen JSON formatı çözülemedi. (finishReason={finish_reason or 'bilinmiyor'})")
+                if raw_preview:
+                    print(f"[Gemini] Ham yanıt (ilk 300 kr): {raw_preview}")
+            else:
+                print("[Gemini] Yanıtta 'candidates' alanı yok veya boş.")
         else:
             print(f"[Gemini] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
