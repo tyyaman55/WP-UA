@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.1 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.2 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -218,12 +218,10 @@ def get_turkish_wiki_page(domain, title):
     """Maddenin varsa Türkçe Wikipedia karşılığını ve yerelleştirilmiş başlığını bulur."""
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
     lang_code = domain.split(".")[0]
-    
-    # Eğer kaynak zaten Türkçe ise
+
     if lang_code == "tr":
         return f"https://tr.wikipedia.org/wiki/{safe_title}", title
 
-    # Interlanguage linkleri için Action=query API'si
     api_url = clean_url(f"https://{domain}/w/api.php")
     params = {
         "action": "query",
@@ -413,9 +411,13 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "TASKS:\n"
         "1. Select ONE single emoji matching the topic.\n"
         "2. Write an English narrative ('narrative_en') focusing on the bizarre paradox, odd law, or funny accident with intelligent dry mischief.\n"
-        "3. Write a Turkish narrative ('narrative_tr') about the same core fact. CRITICAL RULE FOR TURKISH: Do NOT write a robotic translation or stiff textbook sentence. Write it in smooth, natural, native daily Turkish (akıcı, doğal, günlük konuşma ritminde, hafif muzip ve samimi bir dille, 'çeviri' gibi durmayan özgün bir Türkçe metin).\n\n"
+        "3. Write a Turkish narrative ('narrative_tr') about the same core fact.\n\n"
+        "STRICT TURKISH TENSE & STYLE RULES (ÇOK ÖNEMLİ):\n"
+        "- ASLA GENİŞ ZAMAN (-r, -ar, -er, -ır, -ir, -maz, -mez; 'yapılır', 'kutlanır', 'bilinir', 'yer alır') KULLANMAYIN. Geniş zaman metni ruhsuz, resmi ve tercüme bir ansiklopedi maddesine dönüştürür.\n"
+        "- Bunun yerine olayı bir arkadaşınıza ilgi çekici bir hikâye anlatıyormuş gibi aktarın. SADECE geçmiş zaman (-dı/-di, -tı/-ti, -mış/-miş) veya canlı anlatım için şimdiki zaman (-ıyor/-iyor) kullanın.\n"
+        "- Son derece akıcı, doğal, günlük Türkçe söz dizimi kurun. Çeviri kokan kalıplardan uzak durun.\n\n"
         "GENERAL STYLE GUIDELINES:\n"
-        "- Hook the reader with genuine curiosity.\n"
+        "- Hook the reader with genuine curiosity. Slight playful irony is welcome.\n"
         "- No cheesy clickbait hooks ('Imagine this', 'Düşünün ki'). Dive straight into the unusual reality.\n\n"
         "LENGTH CONSTRAINTS (CRITICAL - FILL THE BUDGET):\n"
         f"- narrative_en: MUST be between {target_min_en} and {budget_en} characters.\n"
@@ -428,7 +430,7 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
     for attempt in range(1, 4):
         prompt = base_prompt
         if attempt > 1:
-            prompt += "\n\nCRITICAL RETRY NOTICE: One or both narratives were too short! Expand with rich paradoxes and concrete details to meet the character budgets."
+            prompt += "\n\nCRITICAL RETRY NOTICE: One or both narratives were too short! Expand with rich paradoxes and concrete details to meet the character budgets. Remember: NEVER use Turkish aorist tense (-r, -mez)."
 
         data = None
         if GEMINI_API_KEY:
@@ -519,11 +521,9 @@ def main():
     title_en = chosen_candidate["title"]
     domain = chosen_candidate["domain"]
     extract = target_data.get("extract", "").strip()
-    
-    # İngilizce link ve başlık
+
     page_url_en = target_data.get("content_urls", {}).get("desktop", {}).get("page", "")
 
-    # Türkçe link ve başlık kontrolü (Varsa tr.wikipedia.org)
     tr_url, tr_title = get_turkish_wiki_page(domain, title_en)
     if tr_url and tr_title:
         page_url_tr = tr_url
@@ -532,7 +532,6 @@ def main():
         page_url_tr = page_url_en
         title_tr = title_en
 
-    # Görsel Hazırlığı
     img_url = (
         target_data.get("originalimage", {}).get("source") or 
         target_data.get("thumbnail", {}).get("source")
@@ -554,15 +553,12 @@ def main():
         except Exception as e:
             print(f"Görsel indirilemedi: {e}")
 
-    # Bütçe Hesaplama (EN için)
     header_len_en = len(title_en) + 5
     budget_en = TOTAL_BLUESKY_BUDGET - header_len_en - 2
 
-    # Bütçe Hesaplama (TR için)
     header_len_tr = len(title_tr) + 5
     budget_tr = TOTAL_BLUESKY_BUDGET - header_len_tr - 2
 
-    # Metin Üretimi (Tek Seferde İki Dil, Akıcı Türkçe)
     emoji, narrative_en, narrative_tr = generate_dual_language_posts(
         chosen_candidate, extract, budget_en, budget_tr
     )
@@ -597,7 +593,6 @@ def main():
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
-    # Ortak Arşiv Kaydı
     save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
 
 if __name__ == "__main__":
