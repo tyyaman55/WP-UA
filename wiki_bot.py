@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/6.1 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/6.2 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -379,17 +379,33 @@ def is_valid_turkish(text):
     return len(words.intersection(tr_stopwords)) >= 2
 
 def parse_json_safely(raw_str):
-    if not raw_str:
+    """LLM çıktısından JSON nesnesini hatasız ayıklar."""
+    if not raw_str or not isinstance(raw_str, str):
         return None
-    clean = re.sub(r'^```(?:json)?\s*', '', raw_str.strip(), flags=re.MULTILINE)
-    clean = re.sub(r'\s*```$', '', clean, flags=re.MULTILINE).strip()
+
+    clean = raw_str.strip()
+    clean = re.sub(r'^```(?:json)?\s*', '', clean, flags=re.IGNORECASE)
+    clean = re.sub(r'\s*```$', '', clean)
+    clean = clean.strip()
+
+    # 1. Doğrudan deneme (strict=False kontrol karakterlerini tolere eder)
     try:
-        return json.loads(clean)
+        return json.loads(clean, strict=False)
     except Exception:
-        match = re.search(r'\{.*\}', clean, re.DOTALL)
-        if match:
+        pass
+
+    # 2. İlk { ile son } arasını ayıkla
+    start = clean.find('{')
+    end = clean.rfind('}')
+    if start != -1 and end != -1 and end > start:
+        snippet = clean[start:end+1]
+        try:
+            return json.loads(snippet, strict=False)
+        except Exception:
+            # Trailing comma (sondaki fazla virgül) temizliği
+            fixed = re.sub(r',\s*([}\]])', r'\1', snippet)
             try:
-                return json.loads(match.group(0))
+                return json.loads(fixed, strict=False)
             except Exception:
                 pass
     return None
@@ -423,7 +439,7 @@ def request_gemini(prompt):
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-            print(f"[Gemini] Yanıt alındı ancak beklenen JSON formatı çözülemedi.")
+            print(f"[Gemini] Yanıt alındı ancak beklenen JSON çözülemedi.")
         else:
             print(f"[Gemini] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
@@ -431,7 +447,6 @@ def request_gemini(prompt):
     return None
 
 def request_deepseek(prompt):
-    """DeepSeek-V3 API çağrısı (OpenAI REST uyumlu)."""
     if not DEEPSEEK_API_KEY:
         print("[DeepSeek-V3] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
         return None
@@ -441,28 +456,36 @@ def request_deepseek(prompt):
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
+    # "response_format": {"type": "json_object"} boş string ("") dönme hatasına yol açtığı için kaldırıldı.
     payload = {
-        "model": "deepseek-flash",
+        "model": "deepseek-chat",
         "messages": [
             {
                 "role": "system",
-                "content": "You always respond strictly with a valid JSON object matching the requested schema and nothing else."
+                "content": "You are a specialized curator bot. You MUST ALWAYS output ONLY a single valid raw JSON object. Do not include markdown formatting, code block fences, or any commentary."
             },
             {"role": "user", "content": prompt}
         ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.8,
+        "temperature": 0.75,
         "max_tokens": 1200
     }
 
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=25)
         if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"]
-            parsed = parse_json_safely(content)
-            if parsed:
-                return parsed
-            print(f"[DeepSeek-V3] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
+            choices = resp.json().get("choices", [])
+            if choices:
+                message = choices[0].get("message", {})
+                content = message.get("content", "") or message.get("reasoning_content", "") or ""
+                if content.strip():
+                    parsed = parse_json_safely(content)
+                    if parsed:
+                        return parsed
+                    print(f"[DeepSeek-V3] JSON çözülemedi. Ham içerik: {repr(content[:250])}")
+                else:
+                    print(f"[DeepSeek-V3] Model boş içerik döndürdü. Detay: {choices[0]}")
+            else:
+                print(f"[DeepSeek-V3] choices dizisi boş döndü.")
         else:
             print(f"[DeepSeek-V3] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
@@ -498,8 +521,9 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
     return True, emoji, n_en, n_tr, alt_tr, "Kusursuz"
 
 def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
-    target_min_en = max(200, budget_en - 25)
-    target_min_tr = max(200, budget_tr - 25)
+    # Gerçekçi ve dolgun hedef bütçe (gereksiz reddedilmeleri engeller)
+    target_min_en = max(190, budget_en - 55)
+    target_min_tr = max(190, budget_tr - 55)
 
     caption_info = f"Original Image Caption: {caption}\n" if caption else ""
 
@@ -521,7 +545,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
         "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n"
         "- Avoid excessive punctuation: do NOT use more than 2 mid-sentence punctuation marks (commas/dashes) in a single sentence; split into shorter sentences if needed.\n\n"
         "LENGTH REQUIREMENTS (STRICT):\n"
-        f"- Target Range: narrative_en MUST be between {target_min_en} and {budget_en} characters; narrative_tr MUST be between {target_min_tr} and {budget_tr} characters. Do NOT stop early at 150-180 characters. Fill the available budget with vivid details!\n"
+        f"- Target Range: narrative_en MUST be between {target_min_en} and {budget_en} characters; narrative_tr MUST be between {target_min_tr} and {budget_tr} characters. Fill the available budget with vivid details!\n"
         f"- Hard Limit: Under NO condition exceed {budget_en} characters for EN and {budget_tr} characters for TR.\n"
         "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
         "- Do not repeat or start with the article title.\n"
