@@ -20,7 +20,7 @@ BSKY_APP_PASSWORD_EN = os.environ.get("BSKY_APP_PASSWORD_EN") or os.environ.get(
 BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
 BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+GEMINI_API_KEY = os.environ.get("None")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")
@@ -432,7 +432,6 @@ def request_deepseek(prompt):
         ],
         "temperature": 0.8,
         "max_tokens": 1200,
-        "response_format": {"type": "json_object"}
     }
 
     try:
