@@ -289,7 +289,7 @@ def request_groq(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": "openai/gpt-oss-120b",
         "messages": [{"role": "user", "content": prompt}],
         "response_format": {"type": "json_object"},
         "temperature": 0.75,
@@ -297,7 +297,7 @@ def request_groq(prompt):
     }
 
     try:
-        print("Groq API devreye giriyor (Llama 3.3 70B)...")
+        print("Groq API devreye giriyor (OpenAI GPT-OSS-120b)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             result = resp.json()
