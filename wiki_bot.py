@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.3 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.4 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -316,13 +316,10 @@ def fit_complete_sentences(text, max_len):
     return (truncated[:last_space] if last_space > 0 else truncated).rstrip() + "..."
 
 def validate_internal_punctuation(text, max_internal=2):
-    """Bir cümlenin İÇİNDE (nokta, soru, ünlem hariç) 2'den fazla noktalama işareti olup olmadığını denetler."""
     if not text:
         return True
-    # Cümleleri son noktalama işaretlerine göre ayır
     sentences = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
     for s in sentences:
-        # Cümle içi noktalama işaretleri: virgül, noktalı virgül, iki nokta, tire, parantez
         internal_marks = re.findall(r'[,;:\-—–()[\]]', s)
         if len(internal_marks) > max_internal:
             return False
@@ -415,38 +412,36 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
     target_min_tr = max(200, budget_tr - 25)
 
     base_prompt = (
-        "You curate twin Bluesky feeds dedicated to reality's strangest oddities.\n"
+        "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
         f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
         f"Article Title: {cand['title']}\n"
         f"Curator Note (WHY IT IS UNUSUAL): {cand['curation_note']}\n"
         f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
-        "TASKS:\n"
-        "1. Select ONE single emoji matching the topic.\n"
-        "2. Write an English narrative ('narrative_en') focusing on the bizarre paradox, odd law, or funny accident with intelligent dry mischief.\n"
-        "3. Write a Turkish narrative ('narrative_tr') about the same core fact in natural, flowing Turkish.\n\n"
-        "STRICT PUNCTUATION & SENTENCE RULES (CRITICAL):\n"
-        "- AVOID EXCESSIVE PUNCTUATION. Do NOT clutter sentences with commas, semicolons, or dashes.\n"
-        "- HARD PUNCTUATION CEILING: Inside any single sentence, there MUST NOT be more than TWO mid-sentence punctuation marks (e.g., maximum 2 commas per sentence, excluding the ending period/exclamation mark).\n"
-        "- If an idea requires 3 or more commas/clauses, YOU MUST SPLIT THE SENTENCE into two or three shorter, punchy sentences.\n\n"
-        "TURKISH TENSE & STYLE RULES:\n"
-        "- ASLA GENİŞ ZAMAN (-r, -ar, -er, -ır, -ir, -maz, -mez; 'yapılır', 'bilinir') KULLANMAYIN.\n"
-        "- Sadece geçmiş zaman (-dı/-di, -mış/-miş) veya şimdiki zaman (-ıyor/-iyor) kullanın.\n"
-        "- Doğal, günlük konuşma ritminde olsun.\n\n"
-        "LENGTH CONSTRAINTS (FILL THE BUDGET):\n"
-        f"- narrative_en: MUST be between {target_min_en} and {budget_en} characters.\n"
-        f"- narrative_tr: MUST be between {target_min_tr} and {budget_tr} characters.\n"
-        "- Both narratives MUST end with complete, finished punctuation (. ! ?).\n"
-        "- Never repeat or begin with the article title. No hashtags, no markdown.\n"
-        "- Respond with strictly valid JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\"}."
+        "GOAL:\n"
+        "1. Craft a compelling 2 to 3-sentence micro-narrative in ENGLISH ('narrative_en') that hooks the reader with the sheer bizarre irony of this story.\n"
+        "2. Craft a TURKISH version ('narrative_tr') of the same story in natural, smooth, native daily Turkish (not a literal translation). Never use aorist tense (-r, -ar, -er, -maz, -mez; 'yapılır', 'bilinir'); use past (-dı/-miş) or present continuous (-ıyor).\n\n"
+        "TONE & STYLE (CRITICAL):\n"
+        "- Write with an intriguing, curious narrative voice with a subtle touch of dry, intelligent mischief (playful curiosity without being disrespectful or silly).\n"
+        "- Do NOT write a dry textbook summary. Avoid formal encyclopedic passive phrasing (e.g. 'It is known as...', 'This article describes...').\n"
+        "- Focus on the concrete paradox: the specific odd rule, historical accident, absurd number, or improbable turn of events.\n"
+        "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n"
+        "- Avoid excessive punctuation: do NOT use more than 2 mid-sentence punctuation marks (commas/dashes) in a single sentence; split into shorter sentences if needed.\n\n"
+        "LENGTH REQUIREMENTS (STRICT):\n"
+        f"- Target Range: narrative_en MUST be between {target_min_en} and {budget_en} characters; narrative_tr MUST be between {target_min_tr} and {budget_tr} characters. Do NOT stop early at 150-180 characters. Fill the available budget with vivid details!\n"
+        f"- Hard Limit: Under NO condition exceed {budget_en} characters for EN and {budget_tr} characters for TR.\n"
+        "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
+        "- Do not repeat or start with the article title.\n"
+        "- No hashtags, no markdown formatting.\n"
+        "- Select ONE matching emoji.\n"
+        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\"}."
     )
 
     for attempt in range(1, 4):
         prompt = base_prompt
         if attempt > 1:
             prompt += (
-                "\n\nCRITICAL RETRY NOTICE: Either a sentence had MORE than 2 internal punctuation marks (commas/dashes), "
-                "or the text was too short. Remember: Split long multi-comma sentences into shorter sentences, "
-                "avoid excessive punctuation, and meet the character budget!"
+                "\n\nCRITICAL RETRY NOTICE: Either a sentence was too short or punctuation rules were exceeded. "
+                "Ensure rich details to fill the target character budget, keep punctuation minimal, and never use Turkish aorist tense."
             )
 
         data = None
