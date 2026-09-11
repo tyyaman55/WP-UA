@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.7 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.8 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -37,6 +37,7 @@ GITHUB_API_HEADERS = {
 }
 
 TOTAL_BLUESKY_BUDGET = 300
+MAX_BLOB_IMAGE_SIZE = 950_000
 FALLBACK_EMOJIS = ["📜", "🧐", "💡", "🔍", "✨", "🛸", "🧩"]
 
 UNUSUAL_SOURCES = [
@@ -279,17 +280,35 @@ def fetch_image_caption(domain, title, img_url):
     return None
 
 def optimize_image(img_bytes):
+    """Görseli Bluesky'ın 1 MB (950 KB limit) sınırına sığacak şekilde optimize eder."""
     try:
         img = Image.open(BytesIO(img_bytes))
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
-        img.thumbnail((1600, 1600), Image.Resampling.LANCZOS)
 
-        buffer = BytesIO()
-        img.save(buffer, format="JPEG", quality=85, optimize=True)
-        return buffer.getvalue()
-    except Exception:
-        return img_bytes
+        max_dim = 1600
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+
+        # Kademeli kalite düşürerek 950 KB altına sığdırma
+        for quality in (85, 75, 65, 50, 35):
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=quality, optimize=True)
+            data = buffer.getvalue()
+            if len(data) <= MAX_BLOB_IMAGE_SIZE:
+                return data
+
+        # Hâlâ büyükse piksel boyutunu küçült
+        while len(data) > MAX_BLOB_IMAGE_SIZE and max_dim > 600:
+            max_dim -= 300
+            img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+            buffer = BytesIO()
+            img.save(buffer, format="JPEG", quality=50, optimize=True)
+            data = buffer.getvalue()
+
+        return data if len(data) <= MAX_BLOB_IMAGE_SIZE else None
+    except Exception as e:
+        print(f"Görsel optimize etme hatası: {e}")
+        return None
 
 def fit_complete_sentences(text, max_len):
     raw_sentences = re.split(r'(?<=[.!?])\s+', text.strip())
@@ -429,16 +448,16 @@ def request_groq(prompt):
     return None
 
 def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_min_tr):
-    """Çıktıyı uzunluk, noktalama ve dil kurallarına göre değerlendirir."""
     if not data:
-        return False, None, None, None, "Yanıt boş veya parse edilemedi"
+        return False, None, None, None, None, "Yanıt boş veya parse edilemedi"
 
     emoji = data.get("emoji", "").strip() or random.choice(FALLBACK_EMOJIS)
     n_en = data.get("narrative_en", "").strip()
     n_tr = data.get("narrative_tr", "").strip()
+    alt_tr = data.get("alt_tr", "").strip() if data.get("alt_tr") else None
 
     if not n_en or not n_tr:
-        return False, None, None, None, "Metin alanları eksik (narrative_en veya narrative_tr boş)"
+        return False, None, None, None, None, "Metin alanları eksik (narrative_en veya narrative_tr boş)"
 
     if len(n_en) > budget_en:
         n_en = fit_complete_sentences(n_en, budget_en)
@@ -446,29 +465,33 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
         n_tr = fit_complete_sentences(n_tr, budget_tr)
 
     if not is_valid_turkish(n_tr):
-        return False, None, None, None, "Türkçe metin doğrulaması başarısız (İngilizce saptandı)"
+        return False, None, None, None, None, "Türkçe metin doğrulaması başarısız (İngilizce saptandı)"
 
     if not validate_internal_punctuation(n_tr, max_internal=2):
-        return False, None, None, None, "Türkçe cümlede 2'den fazla iç noktalama işareti var"
+        return False, None, None, None, None, "Türkçe cümlede 2'den fazla iç noktalama işareti var"
 
     if len(n_en) < target_min_en or len(n_tr) < target_min_tr:
-        return False, None, None, None, f"Bütçe yetersiz (EN: {len(n_en)}/{target_min_en}, TR: {len(n_tr)}/{target_min_tr})"
+        return False, None, None, None, None, f"Bütçe yetersiz (EN: {len(n_en)}/{target_min_en}, TR: {len(n_tr)}/{target_min_tr})"
 
-    return True, emoji, n_en, n_tr, "Kusursuz"
+    return True, emoji, n_en, n_tr, alt_tr, "Kusursuz"
 
-def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
+def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
     target_min_en = max(200, budget_en - 25)
     target_min_tr = max(200, budget_tr - 25)
+
+    caption_info = f"Original Image Caption: {caption}\n" if caption else ""
 
     base_prompt = (
         "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
         f"This subject is officially listed on Wikipedia's curated unusual articles list ({cand['domain']}).\n\n"
         f"Article Title: {cand['title']}\n"
         f"Curator Note (WHY IT IS UNUSUAL): {cand['curation_note']}\n"
-        f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n\n"
+        f"Article Extract ({cand['lang'].upper()} Wikipedia): {extract}\n"
+        f"{caption_info}\n"
         "GOAL:\n"
         "1. Craft a compelling 2 to 3-sentence micro-narrative in ENGLISH ('narrative_en') that hooks the reader with the sheer bizarre irony of this story.\n"
-        "2. Craft a TURKISH version ('narrative_tr') of the same story. CRITICAL LANGUAGE RULE: 'narrative_tr' MUST be written 100% in natural, fluent, native TURKISH (TÜRKÇE). Under NO circumstances write English in narrative_tr! Never use aorist tense (-r, -ar, -er, -maz, -mez; 'yapılır', 'bilinir'); use past (-dı/-miş) or present continuous (-ıyor).\n\n"
+        "2. Craft a TURKISH version ('narrative_tr') of the same story. CRITICAL LANGUAGE RULE: 'narrative_tr' MUST be written 100% in natural, fluent, native TURKISH (TÜRKÇE). Under NO circumstances write English in narrative_tr! Never use aorist tense (-r, -ar, -er, -maz, -mez; 'yapılır', 'bilinir'); use past (-dı/-miş) or present continuous (-ıyor).\n"
+        "3. If an Original Image Caption was provided above, localize it into a short, natural Turkish image description for 'alt_tr' (max 150 chars). If no caption was provided, set 'alt_tr' to null.\n\n"
         "TONE & STYLE (CRITICAL):\n"
         "- Write with an intriguing, curious narrative voice with a subtle touch of dry, intelligent mischief (playful curiosity without being disrespectful or silly).\n"
         "- Do NOT write a dry textbook summary. Avoid formal encyclopedic passive phrasing (e.g. 'It is known as...', 'This article describes...').\n"
@@ -482,7 +505,7 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "- Do not repeat or start with the article title.\n"
         "- No hashtags, no markdown formatting.\n"
         "- Select ONE matching emoji.\n"
-        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\"}."
+        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\", \"alt_tr\": \"...\"}."
     )
 
     last_valid_fallback = None
@@ -498,16 +521,16 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
                 "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and avoid aorist tense."
             )
 
-        # 1. DENEME: ÖNCE GEMINI
+        # 1. ÖNCELİK: GEMINI
         print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 2.5 Flash] çağrılıyor...")
         data_gemini = request_gemini(prompt)
-        ok, emoji, n_en, n_tr, reason = validate_candidate_output(
+        ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
             data_gemini, budget_en, budget_tr, target_min_en, target_min_tr
         )
 
         if ok:
             print(f"===> Başarılı! Metin GEMINI tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
-            return emoji, n_en, n_tr
+            return emoji, n_en, n_tr, alt_tr
         else:
             print(f"[Gemini] Çıktı uygun bulunmadı ({reason}).")
             if data_gemini and is_valid_turkish(data_gemini.get("narrative_tr", "")):
@@ -515,19 +538,20 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
                     data_gemini.get("emoji") or random.choice(FALLBACK_EMOJIS),
                     data_gemini.get("narrative_en", ""),
                     data_gemini.get("narrative_tr", ""),
+                    data_gemini.get("alt_tr", ""),
                     "Gemini (Kısmi Bütçe)"
                 )
 
-        # 2. DENEME: GEMINI BAŞARISIZ OLURSA DOĞRUDAN GROQ'A GEÇ
+        # 2. ÖNCELİK: GROQ
         print(f"[Deneme {attempt}/3] [2. Öncelik: Groq Qwen3.6] devreye giriyor...")
         data_groq = request_groq(prompt)
-        ok, emoji, n_en, n_tr, reason = validate_candidate_output(
+        ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
             data_groq, budget_en, budget_tr, target_min_en, target_min_tr
         )
 
         if ok:
             print(f"===> Başarılı! Metin GROQ tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
-            return emoji, n_en, n_tr
+            return emoji, n_en, n_tr, alt_tr
         else:
             print(f"[Groq] Çıktı uygun bulunmadı ({reason}).")
             if data_groq and is_valid_turkish(data_groq.get("narrative_tr", "")):
@@ -535,17 +559,17 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
                     data_groq.get("emoji") or random.choice(FALLBACK_EMOJIS),
                     data_groq.get("narrative_en", ""),
                     data_groq.get("narrative_tr", ""),
+                    data_groq.get("alt_tr", ""),
                     "Groq (Kısmi Bütçe)"
                 )
 
-    # 3 Deneme sonunda tam bütçe tutturulamadıysa fakat geçerli Türkçe üretildiyse onu kurtar
     if last_valid_fallback:
-        em, en_cand, tr_cand, provider = last_valid_fallback
+        em, en_cand, tr_cand, alt_cand, provider = last_valid_fallback
         print(f"\n===> Tam bütçeye ulaşılamadı fakat geçerli Türkçe metin kurtarıldı [{provider}] (EN: {len(en_cand)} kr, TR: {len(tr_cand)} kr).")
-        return em, fit_complete_sentences(en_cand, budget_en), fit_complete_sentences(tr_cand, budget_tr)
+        return em, fit_complete_sentences(en_cand, budget_en), fit_complete_sentences(tr_cand, budget_tr), alt_cand
 
     print("\n[UYARI] Hem Gemini hem Groq başarısız oldu. Çift dilli AI metni üretilemedi!")
-    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None
+    return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None, None
 
 def build_post(display_title, narrative, emoji, page_url):
     builder = client_utils.TextBuilder()
@@ -626,6 +650,7 @@ def main():
         target_data.get("thumbnail", {}).get("source")
     )
     image_bytes = None
+    caption = None
     alt_text_en = f"{title_en} Wikipedia image"
     alt_text_tr = f"{title_tr} Vikipedi görseli"
 
@@ -634,11 +659,14 @@ def main():
             caption = fetch_image_caption(domain, title_en, img_url)
             if caption:
                 alt_text_en = f"{title_en}: {caption}"[:495]
-                alt_text_tr = f"{title_tr}: {caption}"[:495]
 
             r = requests.get(clean_url(img_url), headers=HEADERS, timeout=20)
             if r.status_code == 200:
                 image_bytes = optimize_image(r.content)
+                if image_bytes:
+                    print(f"Görsel optimize edildi ({len(image_bytes)} bytes, Blob < 950KB garantisi sağlandı).")
+                else:
+                    print("Görsel 950 KB sınırına indirilemedi, paylaşım görsel siz yapılacak.")
         except Exception as e:
             print(f"Görsel indirilemedi: {e}")
 
@@ -648,25 +676,30 @@ def main():
     header_len_tr = len(title_tr) + 5
     budget_tr = TOTAL_BLUESKY_BUDGET - header_len_tr - 2
 
-    emoji, narrative_en, narrative_tr = generate_dual_language_posts(
-        chosen_candidate, extract, budget_en, budget_tr
+    emoji, narrative_en, narrative_tr, alt_tr = generate_dual_language_posts(
+        chosen_candidate, extract, caption, budget_en, budget_tr
     )
+
+    if alt_tr:
+        alt_text_tr = f"{title_tr}: {alt_tr}"[:495]
+    elif caption:
+        alt_text_tr = f"{title_tr}: {caption}"[:495]
 
     post_en = build_post(title_en, narrative_en, emoji, page_url_en)
 
-    # 1. HESAP: İNGİLİZCE PAYLAŞIM
+    # 1. HESAP: İNGİLİZCE PAYLAŞIM (langs=['en'])
     try:
         client_en = Client()
         client_en.login(BSKY_HANDLE_EN, BSKY_APP_PASSWORD_EN)
         if image_bytes:
-            client_en.send_image(text=post_en, image=image_bytes, image_alt=alt_text_en)
+            client_en.send_image(text=post_en, image=image_bytes, image_alt=alt_text_en, langs=["en"])
         else:
-            client_en.send_post(text=post_en)
+            client_en.send_post(text=post_en, langs=["en"])
         print(f"[EN Hesap] Başarıyla paylaşıldı: {title_en}")
     except Exception as e:
         print(f"[EN Hesap] Paylaşım hatası: {e}")
 
-    # 2. HESAP: TÜRKÇE PAYLAŞIM
+    # 2. HESAP: TÜRKÇE PAYLAŞIM (langs=['tr'])
     if BSKY_HANDLE_TR and BSKY_APP_PASSWORD_TR:
         if not narrative_tr or not is_valid_turkish(narrative_tr):
             print("[TR Hesap] GÜVENLİK ENGELİ: Geçerli Türkçe metin üretilemediği için İngilizce paylaşım engellendi!")
@@ -676,16 +709,16 @@ def main():
                 client_tr = Client()
                 client_tr.login(BSKY_HANDLE_TR, BSKY_APP_PASSWORD_TR)
                 if image_bytes:
-                    client_tr.send_image(text=post_tr, image=image_bytes, image_alt=alt_text_tr)
+                    client_tr.send_image(text=post_tr, image=image_bytes, image_alt=alt_text_tr, langs=["tr"])
                 else:
-                    client_tr.send_post(text=post_tr)
+                    client_tr.send_post(text=post_tr, langs=["tr"])
                 print(f"[TR Hesap] Başarıyla paylaşıldı: {title_tr}")
             except Exception as e:
                 print(f"[TR Hesap] Paylaşım hatası: {e}")
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
-    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
+    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")[cite: 1]
 
 if __name__ == "__main__":
     main()
