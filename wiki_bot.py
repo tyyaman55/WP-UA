@@ -21,14 +21,14 @@ BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
 BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/6.0 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/6.1 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -64,7 +64,6 @@ UNUSUAL_SOURCES = [
 ]
 
 def record_error_and_exit(error_message):
-    """Hata özetini dosyaya yazar ve GitHub Actions'ın failure durumuna geçmesi için 1 koduyla çıkar."""
     print(f"\n[KRİTİK ARIZA] {error_message}")
     try:
         with open("error_summary.txt", "w", encoding="utf-8") as f:
@@ -431,42 +430,43 @@ def request_gemini(prompt):
         print(f"[Gemini] Bağlantı/Zaman aşımı hatası: {e}")
     return None
 
-def request_groq(prompt):
-    if not GROQ_API_KEY:
-        print("[Groq] API anahtarı (GROQ_API_KEY) tanımlı değil! Atlanıyor.")
+def request_deepseek(prompt):
+    """DeepSeek-V3 API çağrısı (OpenAI REST uyumlu)."""
+    if not DEEPSEEK_API_KEY:
+        print("[DeepSeek-V3] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
         return None
 
-    url = clean_url("https://api.groq.com/openai/v1/chat/completions")
+    url = clean_url("https://api.deepseek.com/chat/completions")
     headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "qwen/qwen3.6-27b",
+        "model": "deepseek-chat",
         "messages": [
             {
                 "role": "system",
-                "content": "You always respond with a single valid JSON object and nothing else — no markdown fences, no commentary."
+                "content": "You always respond strictly with a valid JSON object matching the requested schema and nothing else."
             },
             {"role": "user", "content": prompt}
         ],
+        "response_format": {"type": "json_object"},
         "temperature": 0.8,
-        "reasoning_effort": "none",
         "max_tokens": 1200
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
+        resp = requests.post(url, headers=headers, json=payload, timeout=25)
         if resp.status_code == 200:
             content = resp.json()["choices"][0]["message"]["content"]
             parsed = parse_json_safely(content)
             if parsed:
                 return parsed
-            print(f"[Groq] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
+            print(f"[DeepSeek-V3] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
         else:
-            print(f"[Groq] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
+            print(f"[DeepSeek-V3] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
-        print(f"[Groq] Bağlantı hatası: {e}")
+        print(f"[DeepSeek-V3] Bağlantı hatası: {e}")
     return None
 
 def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_min_tr):
@@ -533,7 +533,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
     last_valid_fallback = None
 
     print(f"\n--- AI Üretim Süreci Başlıyor ---")
-    print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, GROQ={'Tanımlı' if GROQ_API_KEY else 'YOK'}")
+    print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, DEEPSEEK={'Tanımlı' if DEEPSEEK_API_KEY else 'YOK'}")
 
     for attempt in range(1, 4):
         prompt = base_prompt
@@ -543,6 +543,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
                 "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and avoid aorist tense."
             )
 
+        # 1. ÖNCELİK: GEMINI
         print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 2.5 Flash] çağrılıyor...")
         data_gemini = request_gemini(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
@@ -563,24 +564,25 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
                     "Gemini (Kısmi Bütçe)"
                 )
 
-        print(f"[Deneme {attempt}/3] [2. Öncelik: Groq Qwen3.6] devreye giriyor...")
-        data_groq = request_groq(prompt)
+        # 2. ÖNCELİK: DEEPSEEK-V3
+        print(f"[Deneme {attempt}/3] [2. Öncelik: DeepSeek-V3] devreye giriyor...")
+        data_deepseek = request_deepseek(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
-            data_groq, budget_en, budget_tr, target_min_en, target_min_tr
+            data_deepseek, budget_en, budget_tr, target_min_en, target_min_tr
         )
 
         if ok:
-            print(f"===> Başarılı! Metin GROQ tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
+            print(f"===> Başarılı! Metin DEEPSEEK-V3 tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
             return emoji, n_en, n_tr, alt_tr
         else:
-            print(f"[Groq] Çıktı uygun bulunmadı ({reason}).")
-            if data_groq and is_valid_turkish(data_groq.get("narrative_tr", "")):
+            print(f"[DeepSeek-V3] Çıktı uygun bulunmadı ({reason}).")
+            if data_deepseek and is_valid_turkish(data_deepseek.get("narrative_tr", "")):
                 last_valid_fallback = (
-                    data_groq.get("emoji") or random.choice(FALLBACK_EMOJIS),
-                    data_groq.get("narrative_en", ""),
-                    data_groq.get("narrative_tr", ""),
-                    data_groq.get("alt_tr", ""),
-                    "Groq (Kısmi Bütçe)"
+                    data_deepseek.get("emoji") or random.choice(FALLBACK_EMOJIS),
+                    data_deepseek.get("narrative_en", ""),
+                    data_deepseek.get("narrative_tr", ""),
+                    data_deepseek.get("alt_tr", ""),
+                    "DeepSeek-V3 (Kısmi Bütçe)"
                 )
 
     if last_valid_fallback:
@@ -588,7 +590,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
         print(f"\n===> Tam bütçeye ulaşılamadı fakat geçerli Türkçe metin kurtarıldı [{provider}] (EN: {len(en_cand)} kr, TR: {len(tr_cand)} kr).")
         return em, fit_complete_sentences(en_cand, budget_en), fit_complete_sentences(tr_cand, budget_tr), alt_cand
 
-    print("\n[UYARI] Hem Gemini hem Groq başarısız oldu. Çift dilli AI metni üretilemedi!")
+    print("\n[UYARI] Hem Gemini hem DeepSeek-V3 başarısız oldu. Çift dilli AI metni üretilemedi!")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None, None
 
 def build_post(display_title, narrative, emoji, page_url):
@@ -761,7 +763,7 @@ def main():
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
-    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")[cite: 1]
+    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
 
 if __name__ == "__main__":
     main()
