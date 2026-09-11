@@ -482,8 +482,13 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
     return True, emoji, n_en, n_tr, "Kusursuz"
 
 def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
-    target_min_en = max(200, budget_en - 25)
-    target_min_tr = max(200, budget_tr - 25)
+    # Eskiden bu eşik "budget - 25" idi (ör. 258/300) ve model o son 25 karakterlik
+    # dar aralığı sık sık tutturamadığı için "Bütçe yetersiz" diyerek geçerli, iyi
+    # yazılmış metinleri bile reddediyordu. Aralık genişletildi (budget'ın ~%75'i,
+    # taban 150) ki gereksiz reddedilme/retry olmasın; buna karşın aşağıdaki prompt
+    # modeli yine de üst sınıra olabildiğince yaklaşmaya zorluyor.
+    target_min_en = max(150, int(budget_en * 0.75))
+    target_min_tr = max(150, int(budget_tr * 0.75))
 
     base_prompt = (
         "You are the curator of a popular Bluesky feed dedicated to reality's strangest oddities.\n"
@@ -500,8 +505,10 @@ def generate_dual_language_posts(cand, extract, budget_en, budget_tr):
         "- Focus on the concrete paradox: the specific odd rule, historical accident, absurd number, or improbable turn of events.\n"
         "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n"
         "- Avoid excessive punctuation: do NOT use more than 2 mid-sentence punctuation marks (commas/dashes) in a single sentence; split into shorter sentences if needed.\n\n"
-        "LENGTH REQUIREMENTS (STRICT):\n"
-        f"- Target Range: narrative_en MUST be between {target_min_en} and {budget_en} characters; narrative_tr MUST be between {target_min_tr} and {budget_tr} characters. Do NOT stop early at 150-180 characters. Fill the available budget with vivid details!\n"
+        "LENGTH REQUIREMENTS (STRICT - MAXIMIZE LENGTH):\n"
+        f"- You have a hard budget of {budget_en} characters for narrative_en and {budget_tr} characters for narrative_tr. Your goal is to get as close as possible to this exact number, ideally within the last 10-15 characters of it. Treat the budget as a target to fill, not a ceiling to avoid.\n"
+        f"- Absolute minimum (will be REJECTED if shorter): {target_min_en} characters for narrative_en, {target_min_tr} characters for narrative_tr.\n"
+        "- Do NOT stop early at 150-180 characters. If your first draft is short, add another concrete detail, a number, a date, a consequence, or a sensory specific from the extract/curator note to use the remaining space - never pad with filler words or repetition.\n"
         f"- Hard Limit: Under NO condition exceed {budget_en} characters for EN and {budget_tr} characters for TR.\n"
         "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
         "- Do not repeat or start with the article title.\n"
