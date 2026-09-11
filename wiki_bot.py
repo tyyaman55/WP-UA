@@ -731,7 +731,7 @@ def main():
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
-    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")[cite: 1]
+    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
 
 if __name__ == "__main__":
     main()
