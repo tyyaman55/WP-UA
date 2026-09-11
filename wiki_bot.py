@@ -416,13 +416,13 @@ def request_deepseek(prompt):
         print("[DeepSeek] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
         return None
 
-    url = clean_url("https://api.deepseek.com/chat/completions")
+    url = clean_url("https://api.deepseek.com")
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "messages": [
             {
                 "role": "system",
