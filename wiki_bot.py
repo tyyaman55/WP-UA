@@ -422,7 +422,7 @@ def request_deepseek(prompt):
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "deepseek-flash",
+        "model": "deepseek-v4-flash",
         "messages": [
             {
                 "role": "system",
