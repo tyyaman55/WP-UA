@@ -21,22 +21,20 @@ BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
 BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY")
 GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/6.3 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/6.0 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
     "Authorization": f"Bearer {GITHUB_TOKEN}",
     "Accept": "application/vnd.github+json"
 }
-
-GEMINI_QUOTA_EXHAUSTED = False  # 429 alındığında True olur; aynı çalıştırmada Gemini'yi tekrar tekrar denemeyi (ve zaman kaybetmeyi) engeller
 
 TOTAL_BLUESKY_BUDGET = 300
 MAX_BLOB_IMAGE_SIZE = 950_000
@@ -66,6 +64,7 @@ UNUSUAL_SOURCES = [
 ]
 
 def record_error_and_exit(error_message):
+    """Hata özetini dosyaya yazar ve GitHub Actions'ın failure durumuna geçmesi için 1 koduyla çıkar."""
     print(f"\n[KRİTİK ARIZA] {error_message}")
     try:
         with open("error_summary.txt", "w", encoding="utf-8") as f:
@@ -380,136 +379,25 @@ def is_valid_turkish(text):
     words = set(re.findall(r'\b[a-zA-ZçğıöşüÇĞİÖŞÜ]+\b', text.lower()))
     return len(words.intersection(tr_stopwords)) >= 2
 
-def _find_balanced_json_span(text, start):
-    """
-    '{' karakterinden başlayarak, string içindeki (tırnaklı) süslü parantezleri
-    saymadan, dengeyi karakter karakter takip ederek gerçek kapanış '}' konumunu
-    bulur. Naif str.rfind('}') yaklaşımı, metin içeriğinde (narrative alanlarında)
-    geçen '}' karakterlerinde veya kod bloğu kalıntılarında yanılabiliyordu; bu
-    tarayıcı JSON söz dizimini (tırnak/escape farkında) gerçekten takip eder.
-    Dengeli bir kapanış bulunursa (start, end) döner; bulunamazsa (kesilmiş
-    yanıt durumu) end=None döner.
-    """
-    depth = 0
-    in_string = False
-    escape = False
-    for i in range(start, len(text)):
-        ch = text[i]
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == '\\':
-                escape = True
-            elif ch == '"':
-                in_string = False
-        else:
-            if ch == '"':
-                in_string = True
-            elif ch == '{':
-                depth += 1
-            elif ch == '}':
-                depth -= 1
-                if depth == 0:
-                    return start, i
-    return start, None
-
-def _extract_fields_via_regex(text):
-    """
-    Son çare: JSON tamamen bozuk/kesilmişse bile, beklenen alanları doğrudan
-    metin üzerinden regex ile çekmeyi dener (kısmi kurtarma). Bulunan alanlar
-    kadarıyla bir sözlük döner; hiçbir alan bulunamazsa None döner.
-    """
-    result = {}
-    patterns = {
-        "emoji": r'"emoji"\s*:\s*"(.*?)(?<!\\)"',
-        "narrative_en": r'"narrative_en"\s*:\s*"(.*?)(?<!\\)"',
-        "narrative_tr": r'"narrative_tr"\s*:\s*"(.*?)(?<!\\)"',
-        "alt_tr": r'"alt_tr"\s*:\s*"(.*?)(?<!\\)"',
-    }
-    for key, pattern in patterns.items():
-        m = re.search(pattern, text, flags=re.DOTALL)
-        if m:
-            val = m.group(1)
-            val = val.replace('\\"', '"').replace('\\n', ' ').replace('\\\\', '\\')
-            result[key] = val.strip()
-
-    # narrative_tr kesik kalmış olabilir (kapanış tırnağı hiç gelmemiş).
-    # Bu durumda alanı, en azından tamamlanmış cümlelere kadar kurtarmayı dene.
-    if "narrative_tr" not in result:
-        m = re.search(r'"narrative_tr"\s*:\s*"(.*)$', text, flags=re.DOTALL)
-        if m:
-            val = m.group(1)
-            val = re.sub(r'"\s*,?\s*"?\w*"?\s*:?\s*$', '', val)
-            val = val.replace('\\"', '"').replace('\\n', ' ').replace('\\\\', '\\')
-            if val.strip():
-                result["narrative_tr"] = val.strip()
-
-    return result if result.get("narrative_en") or result.get("narrative_tr") else None
-
 def parse_json_safely(raw_str):
-    if not raw_str or not isinstance(raw_str, str):
+    if not raw_str:
         return None
-
-    clean = raw_str.strip()
-    clean = re.sub(r'^```(?:json)?\s*', '', clean, flags=re.IGNORECASE)
-    clean = re.sub(r'\s*```$', '', clean)
-    clean = clean.strip()
-
-    # 1) Doğrudan dene (en yaygın, temiz durum)
+    clean = re.sub(r'^```(?:json)?\s*', '', raw_str.strip(), flags=re.MULTILINE)
+    clean = re.sub(r'\s*```$', '', clean, flags=re.MULTILINE).strip()
     try:
-        return json.loads(clean, strict=False)
+        return json.loads(clean)
     except Exception:
-        pass
-
-    start = clean.find('{')
-    if start == -1:
-        # Hiç '{' yoksa JSON değil; yine de alanları kurtarmayı dene.
-        return _extract_fields_via_regex(clean)
-
-    # 2) Tırnak/escape farkında dengeli parantez taraması ile gerçek span'i bul
-    span_start, span_end = _find_balanced_json_span(clean, start)
-    if span_end is not None:
-        snippet = clean[span_start:span_end + 1]
-        try:
-            return json.loads(snippet, strict=False)
-        except Exception:
-            fixed = re.sub(r',\s*([}\]])', r'\1', snippet)
+        match = re.search(r'\{.*\}', clean, re.DOTALL)
+        if match:
             try:
-                return json.loads(fixed, strict=False)
+                return json.loads(match.group(0))
             except Exception:
                 pass
-
-    # 3) Yanıt max_tokens sınırına takılıp ortasından kesilmiş olabilir
-    # (dengeli bir kapanış hiç bulunamadı). Açık kalan tırnağı/parantezleri
-    # kapatıp tekrar dene.
-    repaired = clean[start:]
-    if repaired.count('"') % 2 == 1:
-        repaired += '"'
-    open_braces = repaired.count('{') - repaired.count('}')
-    repaired += '}' * max(open_braces, 0)
-    try:
-        return json.loads(repaired, strict=False)
-    except Exception:
-        pass
-
-    fixed_repaired = re.sub(r',\s*([}\]])', r'\1', repaired)
-    try:
-        return json.loads(fixed_repaired, strict=False)
-    except Exception:
-        pass
-
-    # 4) Son çare: JSON hâlâ çözülemiyorsa, ham metinden alanları regex ile kurtar.
-    return _extract_fields_via_regex(clean)
+    return None
 
 def request_gemini(prompt):
-    global GEMINI_QUOTA_EXHAUSTED
-
     if not GEMINI_API_KEY:
         print("[Gemini] API anahtarı (GEMINI_API_KEY) tanımlı değil! Atlanıyor.")
-        return None
-
-    if GEMINI_QUOTA_EXHAUSTED:
-        print("[Gemini] Bu çalıştırmada kota daha önce tükendi (429), tekrar denenmiyor.")
         return None
 
     url = clean_url(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}")
@@ -517,7 +405,7 @@ def request_gemini(prompt):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "response_mime_type": "application/json",
-            "maxOutputTokens": 2048,
+            "maxOutputTokens": 1200,
             "temperature": 0.85,
             "thinkingConfig": {
                 "thinkingBudget": 0
@@ -528,81 +416,57 @@ def request_gemini(prompt):
     try:
         resp = requests.post(url, json=payload, timeout=20)
         if resp.status_code == 200:
-            data = resp.json()
-            candidates = data.get("candidates", [])
+            candidates = resp.json().get("candidates", [])
             if candidates:
-                finish_reason = candidates[0].get("finishReason")
                 parts = candidates[0].get("content", {}).get("parts", [])
                 for part in parts:
                     if "text" in part and part["text"].strip():
                         parsed = parse_json_safely(part["text"])
                         if parsed:
                             return parsed
-                        if finish_reason == "MAX_TOKENS":
-                            print("[Gemini] Çıktı maxOutputTokens sınırında kesildi (finishReason=MAX_TOKENS), JSON tamamlanamadı.")
-                        print(f"[Gemini] Yanıt alındı ancak beklenen JSON çözülemedi. Ham içerik: {repr(part['text'][:800])}")
-                        return None
-            print(f"[Gemini] Yanıt alındı ancak içerik/candidate boş döndü: {repr(str(data)[:500])}")
-        elif resp.status_code == 429:
-            GEMINI_QUOTA_EXHAUSTED = True
-            print(f"[Gemini] HTTP 429 (kota aşıldı) — bu çalıştırmada Gemini artık denenmeyecek. Detay: {resp.text[:300]}")
+            print(f"[Gemini] Yanıt alındı ancak beklenen JSON formatı çözülemedi.")
         else:
             print(f"[Gemini] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
         print(f"[Gemini] Bağlantı/Zaman aşımı hatası: {e}")
     return None
 
-def request_deepseek(prompt):
-    """DeepSeek resmi API spesifikasyonuna (JSON mode & pricing/docs) tam uyumlu çağrı."""
-    if not DEEPSEEK_API_KEY:
-        print("[DeepSeek-V3] API anahtarı (DEEPSEEK_API_KEY) tanımlı değil! Atlanıyor.")
+def request_groq(prompt):
+    if not GROQ_API_KEY:
+        print("[Groq] API anahtarı (GROQ_API_KEY) tanımlı değil! Atlanıyor.")
         return None
 
-    url = clean_url("https://api.deepseek.com/chat/completions")
+    url = clean_url("https://api.groq.com/openai/v1/chat/completions")
     headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Authorization": f"Bearer {GROQ_API_KEY}",
         "Content-Type": "application/json"
     }
-
-    # DeepSeek JSON Mode kuralı: Prompt/Messages içinde mutlaka açıkça 'json' kelimesi geçmelidir.
     payload = {
-        "model": "deepseek-chat",
+        "model": "qwen/qwen3.6-27b",
         "messages": [
             {
                 "role": "system",
-                "content": "You are a specialized curator bot designed to output JSON. You must ALWAYS output a single valid raw JSON object matching the requested schema. No conversational filler."
+                "content": "You always respond with a single valid JSON object and nothing else — no markdown fences, no commentary."
             },
             {"role": "user", "content": prompt}
         ],
-        "response_format": {
-            "type": "json_object"
-        },
-        "temperature": 0.7,
-        "max_tokens": 4096
+        "temperature": 0.8,
+        "reasoning_effort": "none",
+        "max_tokens": 1200
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=25)
+        resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
-            choices = resp.json().get("choices", [])
-            if choices:
-                finish_reason = choices[0].get("finish_reason")
-                content = choices[0].get("message", {}).get("content", "")
-                if content and content.strip():
-                    parsed = parse_json_safely(content)
-                    if parsed:
-                        return parsed
-                    if finish_reason == "length":
-                        print(f"[DeepSeek-V3] Çıktı max_tokens sınırında kesildi (finish_reason=length), JSON tamamlanamadı.")
-                    print(f"[DeepSeek-V3] JSON parse edilemedi. Ham içerik: {repr(content[:800])}")
-                else:
-                    print(f"[DeepSeek-V3] Boş içerik döndü (finish_reason={finish_reason}): {choices[0]}")
-            else:
-                print(f"[DeepSeek-V3] choices dizisi boş döndü.")
+            content = resp.json()["choices"][0]["message"]["content"]
+            parsed = parse_json_safely(content)
+            if parsed:
+                return parsed
+            print(f"[Groq] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
         else:
-            print(f"[DeepSeek-V3] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
+            print(f"[Groq] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
     except Exception as e:
-        print(f"[DeepSeek-V3] Bağlantı hatası: {e}")
+        print(f"[Groq] Bağlantı hatası: {e}")
     return None
 
 def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_min_tr):
@@ -634,8 +498,8 @@ def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_
     return True, emoji, n_en, n_tr, alt_tr, "Kusursuz"
 
 def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
-    target_min_en = max(190, budget_en - 55)
-    target_min_tr = max(190, budget_tr - 55)
+    target_min_en = max(200, budget_en - 25)
+    target_min_tr = max(200, budget_tr - 25)
 
     caption_info = f"Original Image Caption: {caption}\n" if caption else ""
 
@@ -657,29 +521,28 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
         "- No cheesy clickbait hooks like 'Imagine this', 'Picture this', 'Meet the', 'What if', or 'You won't believe'. Dive straight into the bizarre action or fact.\n"
         "- Avoid excessive punctuation: do NOT use more than 2 mid-sentence punctuation marks (commas/dashes) in a single sentence; split into shorter sentences if needed.\n\n"
         "LENGTH REQUIREMENTS (STRICT):\n"
-        f"- Target Range: narrative_en MUST be between {target_min_en} and {budget_en} characters; narrative_tr MUST be between {target_min_tr} and {budget_tr} characters. Fill the available budget with vivid details!\n"
+        f"- Target Range: narrative_en MUST be between {target_min_en} and {budget_en} characters; narrative_tr MUST be between {target_min_tr} and {budget_tr} characters. Do NOT stop early at 150-180 characters. Fill the available budget with vivid details!\n"
         f"- Hard Limit: Under NO condition exceed {budget_en} characters for EN and {budget_tr} characters for TR.\n"
         "- End on a finished, grammatically complete sentence (punctuated with . ! or ?).\n"
         "- Do not repeat or start with the article title.\n"
         "- No hashtags, no markdown formatting.\n"
         "- Select ONE matching emoji.\n"
-        "- Respond strictly with a single JSON object containing keys: emoji, narrative_en, narrative_tr, alt_tr."
+        "- Return strictly a single JSON: {\"emoji\": \"...\", \"narrative_en\": \"...\", \"narrative_tr\": \"...\", \"alt_tr\": \"...\"}."
     )
 
     last_valid_fallback = None
 
     print(f"\n--- AI Üretim Süreci Başlıyor ---")
-    print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, DEEPSEEK={'Tanımlı' if DEEPSEEK_API_KEY else 'YOK'}")
+    print(f"API Durumu: GEMINI={'Tanımlı' if GEMINI_API_KEY else 'YOK'}, GROQ={'Tanımlı' if GROQ_API_KEY else 'YOK'}")
 
     for attempt in range(1, 4):
         prompt = base_prompt
         if attempt > 1:
             prompt += (
                 "\n\nCRITICAL RETRY NOTICE: Either 'narrative_tr' was NOT written in Turkish, or a sentence had excess punctuation, "
-                "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and output pure JSON."
+                "or text was too short. You MUST write 'narrative_tr' purely in TURKISH, fill the character budget, and avoid aorist tense."
             )
 
-        # 1. ÖNCELİK: GEMINI
         print(f"\n[Deneme {attempt}/3] [1. Öncelik: Gemini 2.5 Flash] çağrılıyor...")
         data_gemini = request_gemini(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
@@ -700,25 +563,24 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
                     "Gemini (Kısmi Bütçe)"
                 )
 
-        # 2. ÖNCELİK: DEEPSEEK-V3
-        print(f"[Deneme {attempt}/3] [2. Öncelik: DeepSeek-V3] devreye giriyor...")
-        data_deepseek = request_deepseek(prompt)
+        print(f"[Deneme {attempt}/3] [2. Öncelik: Groq Qwen3.6] devreye giriyor...")
+        data_groq = request_groq(prompt)
         ok, emoji, n_en, n_tr, alt_tr, reason = validate_candidate_output(
-            data_deepseek, budget_en, budget_tr, target_min_en, target_min_tr
+            data_groq, budget_en, budget_tr, target_min_en, target_min_tr
         )
 
         if ok:
-            print(f"===> Başarılı! Metin DEEPSEEK-V3 tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
+            print(f"===> Başarılı! Metin GROQ tarafından üretildi (EN: {len(n_en)} kr, TR: {len(n_tr)} kr).")
             return emoji, n_en, n_tr, alt_tr
         else:
-            print(f"[DeepSeek-V3] Çıktı uygun bulunmadı ({reason}).")
-            if data_deepseek and is_valid_turkish(data_deepseek.get("narrative_tr", "")):
+            print(f"[Groq] Çıktı uygun bulunmadı ({reason}).")
+            if data_groq and is_valid_turkish(data_groq.get("narrative_tr", "")):
                 last_valid_fallback = (
-                    data_deepseek.get("emoji") or random.choice(FALLBACK_EMOJIS),
-                    data_deepseek.get("narrative_en", ""),
-                    data_deepseek.get("narrative_tr", ""),
-                    data_deepseek.get("alt_tr", ""),
-                    "DeepSeek-V3 (Kısmi Bütçe)"
+                    data_groq.get("emoji") or random.choice(FALLBACK_EMOJIS),
+                    data_groq.get("narrative_en", ""),
+                    data_groq.get("narrative_tr", ""),
+                    data_groq.get("alt_tr", ""),
+                    "Groq (Kısmi Bütçe)"
                 )
 
     if last_valid_fallback:
@@ -726,7 +588,7 @@ def generate_dual_language_posts(cand, extract, caption, budget_en, budget_tr):
         print(f"\n===> Tam bütçeye ulaşılamadı fakat geçerli Türkçe metin kurtarıldı [{provider}] (EN: {len(en_cand)} kr, TR: {len(tr_cand)} kr).")
         return em, fit_complete_sentences(en_cand, budget_en), fit_complete_sentences(tr_cand, budget_tr), alt_cand
 
-    print("\n[UYARI] Hem Gemini hem DeepSeek-V3 başarısız oldu. Çift dilli AI metni üretilemedi!")
+    print("\n[UYARI] Hem Gemini hem Groq başarısız oldu. Çift dilli AI metni üretilemedi!")
     return random.choice(FALLBACK_EMOJIS), fit_complete_sentences(extract, budget_en), None, None
 
 def build_post(display_title, narrative, emoji, page_url):
@@ -899,7 +761,7 @@ def main():
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
-    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
+    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")[cite: 1]
 
 if __name__ == "__main__":
     main()
