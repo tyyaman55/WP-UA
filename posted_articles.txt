@@ -43,3 +43,4 @@ en:Cartesian theatre
 en:Statue of Louis Agassiz
 en:Mount Rushmore
 en:Flat Earth
+en:The Christian Science Monitor
