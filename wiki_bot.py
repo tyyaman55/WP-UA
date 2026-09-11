@@ -430,21 +430,34 @@ def request_groq(prompt):
         ],
         "temperature": 0.8,
         "reasoning_effort": "none",
-        "max_tokens": 1200
+        "max_tokens": 900
     }
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=15)
-        if resp.status_code == 200:
-            content = resp.json()["choices"][0]["message"]["content"]
-            parsed = parse_json_safely(content)
-            if parsed:
-                return parsed
-            print(f"[Groq] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
-        else:
-            print(f"[Groq] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
-    except Exception as e:
-        print(f"[Groq] Bağlantı hatası: {e}")
+    for attempt in range(1, 3):
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=15)
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"]
+                parsed = parse_json_safely(content)
+                if parsed:
+                    return parsed
+                print(f"[Groq] Yanıt alındı ancak JSON çözülemedi: {content[:200]}")
+                return None
+            elif resp.status_code == 429:
+                retry_after = resp.headers.get("Retry-After")
+                wait_s = float(retry_after) if retry_after else 8.0
+                print(f"[Groq] HTTP 429 (rate limit). {wait_s:.1f}sn bekleyip tekrar denenecek...")
+                if attempt < 2:
+                    time.sleep(wait_s)
+                    continue
+                print(f"[Groq] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
+                return None
+            else:
+                print(f"[Groq] HTTP {resp.status_code} Hatası: {resp.text[:300]}")
+                return None
+        except Exception as e:
+            print(f"[Groq] Bağlantı hatası: {e}")
+            return None
     return None
 
 def validate_candidate_output(data, budget_en, budget_tr, target_min_en, target_min_tr):
