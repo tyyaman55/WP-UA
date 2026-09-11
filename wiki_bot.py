@@ -297,7 +297,7 @@ def request_groq(prompt):
     }
 
     try:
-        print("Groq API devreye giriyor (OpenAI GPT-OSS-120b)...")
+        print("Groq API devreye giriyor (Llama 3.3 70B)...")
         resp = requests.post(url, headers=headers, json=payload, timeout=15)
         if resp.status_code == 200:
             result = resp.json()
@@ -317,12 +317,21 @@ def generate_ai_curated_post(title, extract, available_budget):
     target_min = max(200, available_budget - 20)
 
     prompt = (
-        "You are the curator of a top Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes.\n\n"
+        "You are the curator of a top Bluesky account uncovering bizarre, absurd, and fascinating Wikipedia rabbit holes. "
+        "Your readers follow you because the account is genuinely informative first, and intriguing as a result of the facts themselves — never because of gimmicky delivery.\n\n"
         f"Article Title: {title}\n"
         f"Article Background Details: {extract}\n\n"
         "Task:\n"
         "1. Select ONE single emoji capturing the core absurdity of this subject.\n"
-        "2. Write a highly engaging, richly detailed, and witty narrative explaining WHY this topic is so strange or incredible.\n\n"
+        "2. Write a narrative that leads with a concrete, specific fact or detail from the article (a name, date, number, place, or event) and builds outward from it. "
+        "The strangeness should emerge from the facts you present, not from how breathlessly you narrate them.\n\n"
+        "VOICE AND STYLE RULES (STRICTLY ENFORCED):\n"
+        "- Never open with \"Imagine\", \"Picture this\", \"What if\", \"Ever wondered\", \"Meet\", \"Let's talk about\", or any other stock hook. "
+        "Vary your opening structure every time — start directly with a fact, a specific detail, or a surprising cause-and-effect, not a templated setup phrase.\n"
+        "- Do not address the reader directly (no \"you\", no rhetorical questions used as a device, no commands like \"buckle up\").\n"
+        "- Avoid breathless or tabloid-style intensifiers (\"insane\", \"wild\", \"you won't believe\", \"absolutely bonkers\"). Let the facts carry the weight.\n"
+        "- Tone: informative and precise, with dry, understated wit where it fits naturally — never silly, never overly casual or slangy.\n"
+        "- Write like a knowledgeable person explaining something remarkable to a curious friend, not like a viral-content copywriter.\n\n"
         "CRITICAL CHARACTER BUDGET REQUIREMENTS (DO NOT IGNORE):\n"
         f"- Target Length: You MUST write between {target_min} and {available_budget} characters. Do NOT write brief summaries.\n"
         f"- Absolute Maximum: Under NO circumstances exceed {available_budget} characters (hard platform cutoff).\n"
