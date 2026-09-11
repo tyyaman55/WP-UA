@@ -2,6 +2,7 @@ name: Wikipedia Bot to Bluesky
 
 on:
   schedule:
+    # TSİ 09.06 (UTC 06.06)
     - cron: '6 6 * * *'
   workflow_dispatch:
 
@@ -14,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      issues: write
 
     steps:
       - name: Depoyu Klonla
@@ -39,3 +41,28 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python wiki_bot.py
+
+      - name: Hata Bildirimi
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          ERROR_DETAILS="İş akışı beklenmedik şekilde kesintiye uğradı."
+          if [ -f error_summary.txt ]; then
+            ERROR_DETAILS=$(cat error_summary.txt)
+          fi
+
+          gh issue create \
+            --title "🚨 Vikipedi Bot Çalışma Hatası ($(date +'%Y-%m-%d %H:%M UTC'))" \
+            --body "### ⚠️ Bot Çalıştırma Hatası
+
+          Bot çalıştırma adımı başarısız oldu ve paylaşım yapılamadı.
+
+          **Arıza Nedeni:**
+          \`\`\`
+          ${ERROR_DETAILS}
+          \`\`\`
+
+          **İş Akışı Kayıtları:**
+          Ayrıntılı hata günlüklerini incelemek için [buraya tıklayın](${RUN_URL})." || true
