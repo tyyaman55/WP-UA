@@ -32,3 +32,4 @@ en:Something Awful
 en:The Straight Dope
 en:Professional regurgitation
 en:Hoax
+en:Cult following
