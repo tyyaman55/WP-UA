@@ -28,7 +28,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.8 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "BlueskyUnusualWikiBot/5.9 (https://bsky.app/; dual-language curated bot)"
 }
 
 GITHUB_API_HEADERS = {
@@ -215,6 +215,24 @@ def fetch_summary(domain, title):
         pass
     return None
 
+def resolve_image_url(target_data):
+    """SVG tuzaklarını bertaraf ederek Pillow'un açabileceği raster (PNG/JPG) görseli seçer."""
+    orig_url = target_data.get("originalimage", {}).get("source") or ""
+    thumb_url = target_data.get("thumbnail", {}).get("source") or ""
+
+    def is_svg(url):
+        return url.lower().endswith(".svg") or ".svg/" in url.lower()
+
+    # Orijinal görsel SVG değilse yüksek çözünürlüklü orijinali tercih et
+    if orig_url and not is_svg(orig_url):
+        return orig_url
+
+    # Orijinal SVG ise Wikimedia'nın otomatik ürettiği raster thumbnail PNG'yi kullan
+    if thumb_url and not is_svg(thumb_url):
+        return thumb_url
+
+    return None
+
 def get_turkish_wiki_page(domain, title):
     safe_title = urllib.parse.quote(title.replace(" ", "_"), safe="")
     lang_code = domain.split(".")[0]
@@ -280,7 +298,7 @@ def fetch_image_caption(domain, title, img_url):
     return None
 
 def optimize_image(img_bytes):
-    """Görseli Bluesky'ın 1 MB (950 KB limit) sınırına sığacak şekilde optimize eder."""
+    """Görseli Bluesky'ın 1 MB (950 KB) sınırına sığacak şekilde optimize eder."""
     try:
         img = Image.open(BytesIO(img_bytes))
         if img.mode in ("RGBA", "P"):
@@ -289,7 +307,6 @@ def optimize_image(img_bytes):
         max_dim = 1600
         img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
 
-        # Kademeli kalite düşürerek 950 KB altına sığdırma
         for quality in (85, 75, 65, 50, 35):
             buffer = BytesIO()
             img.save(buffer, format="JPEG", quality=quality, optimize=True)
@@ -297,7 +314,6 @@ def optimize_image(img_bytes):
             if len(data) <= MAX_BLOB_IMAGE_SIZE:
                 return data
 
-        # Hâlâ büyükse piksel boyutunu küçült
         while len(data) > MAX_BLOB_IMAGE_SIZE and max_dim > 600:
             max_dim -= 300
             img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
@@ -579,6 +595,29 @@ def build_post(display_title, narrative, emoji, page_url):
     builder.text(narrative)
     return builder
 
+def send_with_retry(client, rich_text, image_bytes=None, image_alt=None, langs=None, max_retries=3, delay=3):
+    """Bluesky sunucularının geçici 502/503 ağ hatalarına karşı yeniden deneme döngüsü."""
+    for attempt in range(1, max_retries + 1):
+        try:
+            if image_bytes:
+                return client.send_image(
+                    text=rich_text,
+                    image=image_bytes,
+                    image_alt=image_alt,
+                    langs=langs
+                )
+            else:
+                return client.send_post(
+                    text=rich_text,
+                    langs=langs
+                )
+        except Exception as e:
+            print(f"Bluesky gönderim hatası (Deneme {attempt}/{max_retries}): {e}")
+            if attempt < max_retries:
+                time.sleep(delay)
+            else:
+                raise e
+
 def main():
     if not BSKY_HANDLE_EN or not BSKY_APP_PASSWORD_EN:
         print("İngilizce Bluesky hesap bilgileri eksik.")
@@ -645,10 +684,8 @@ def main():
         page_url_tr = page_url_en
         title_tr = title_en
 
-    img_url = (
-        target_data.get("originalimage", {}).get("source") or 
-        target_data.get("thumbnail", {}).get("source")
-    )
+    # SVG tuzaklarını bertaraf eden görsel seçimi
+    img_url = resolve_image_url(target_data)
     image_bytes = None
     caption = None
     alt_text_en = f"{title_en} Wikipedia image"
@@ -666,7 +703,7 @@ def main():
                 if image_bytes:
                     print(f"Görsel optimize edildi ({len(image_bytes)} bytes, Blob < 950KB garantisi sağlandı).")
                 else:
-                    print("Görsel 950 KB sınırına indirilemedi, paylaşım görsel siz yapılacak.")
+                    print("Görsel 950 KB sınırına indirilemedi, metin modunda devam edilecek.")
         except Exception as e:
             print(f"Görsel indirilemedi: {e}")
 
@@ -687,19 +724,22 @@ def main():
 
     post_en = build_post(title_en, narrative_en, emoji, page_url_en)
 
-    # 1. HESAP: İNGİLİZCE PAYLAŞIM (langs=['en'])
+    # 1. HESAP: İNGİLİZCE PAYLAŞIM
     try:
         client_en = Client()
         client_en.login(BSKY_HANDLE_EN, BSKY_APP_PASSWORD_EN)
-        if image_bytes:
-            client_en.send_image(text=post_en, image=image_bytes, image_alt=alt_text_en, langs=["en"])
-        else:
-            client_en.send_post(text=post_en, langs=["en"])
+        send_with_retry(
+            client=client_en,
+            rich_text=post_en,
+            image_bytes=image_bytes,
+            image_alt=alt_text_en,
+            langs=["en"]
+        )
         print(f"[EN Hesap] Başarıyla paylaşıldı: {title_en}")
     except Exception as e:
         print(f"[EN Hesap] Paylaşım hatası: {e}")
 
-    # 2. HESAP: TÜRKÇE PAYLAŞIM (langs=['tr'])
+    # 2. HESAP: TÜRKÇE PAYLAŞIM
     if BSKY_HANDLE_TR and BSKY_APP_PASSWORD_TR:
         if not narrative_tr or not is_valid_turkish(narrative_tr):
             print("[TR Hesap] GÜVENLİK ENGELİ: Geçerli Türkçe metin üretilemediği için İngilizce paylaşım engellendi!")
@@ -708,17 +748,20 @@ def main():
                 post_tr = build_post(title_tr, narrative_tr, emoji, page_url_tr)
                 client_tr = Client()
                 client_tr.login(BSKY_HANDLE_TR, BSKY_APP_PASSWORD_TR)
-                if image_bytes:
-                    client_tr.send_image(text=post_tr, image=image_bytes, image_alt=alt_text_tr, langs=["tr"])
-                else:
-                    client_tr.send_post(text=post_tr, langs=["tr"])
+                send_with_retry(
+                    client=client_tr,
+                    rich_text=post_tr,
+                    image_bytes=image_bytes,
+                    image_alt=alt_text_tr,
+                    langs=["tr"]
+                )
                 print(f"[TR Hesap] Başarıyla paylaşıldı: {title_tr}")
             except Exception as e:
                 print(f"[TR Hesap] Paylaşım hatası: {e}")
     else:
         print("Türkçe hesap kimlik bilgileri tanımlı değil, sadece İngilizce paylaşıldı.")
 
-    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")[cite: 1]
+    save_posted_title(f"{chosen_candidate['lang']}:{title_en}")
 
 if __name__ == "__main__":
     main()
