@@ -11,6 +11,7 @@ import requests
 from io import BytesIO
 from PIL import Image
 from atproto import Client, client_utils
+import tweepy
 
 # İngilizce Hesap (Birincil)
 BSKY_HANDLE_EN = os.environ.get("BSKY_HANDLE_EN") or os.environ.get("BSKY_HANDLE")
@@ -19,6 +20,13 @@ BSKY_APP_PASSWORD_EN = os.environ.get("BSKY_APP_PASSWORD_EN") or os.environ.get(
 # Türkçe Hesap (İkincil)
 BSKY_HANDLE_TR = os.environ.get("BSKY_TR_HANDLE")
 BSKY_APP_PASSWORD_TR = os.environ.get("BSKY_TR_APP_PASSWORD")
+
+# X (İngilizce Hesap)
+X_API_KEY = os.environ.get("X_API_KEY")
+X_API_SECRET = os.environ.get("X_API_SECRET")
+X_ACCESS_TOKEN_EN = os.environ.get("X_ACCESS_TOKEN_EN")
+X_ACCESS_SECRET_EN = os.environ.get("X_ACCESS_SECRET_EN")
+X_CHAR_LIMIT = 280
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY")
@@ -576,6 +584,40 @@ def build_post(display_title, narrative, emoji, page_url):
     builder.text(narrative)
     return builder
 
+def build_x_text(display_title, narrative, emoji, limit=X_CHAR_LIMIT):
+    header = f"{emoji} {display_title.upper()}\n\n"
+    available = max(0, limit - len(header))
+    text = narrative
+    if len(text) > available:
+        text = fit_complete_sentences(text, available)
+    return header + text
+
+def post_to_x(text, image_bytes=None):
+    if not (X_API_KEY and X_API_SECRET and X_ACCESS_TOKEN_EN and X_ACCESS_SECRET_EN):
+        print("[X Hesap] Kimlik bilgileri eksik, X paylaşımı atlandı.")
+        return
+    try:
+        client_v2 = tweepy.Client(
+            consumer_key=X_API_KEY,
+            consumer_secret=X_API_SECRET,
+            access_token=X_ACCESS_TOKEN_EN,
+            access_token_secret=X_ACCESS_SECRET_EN,
+        )
+
+        media_ids = None
+        if image_bytes:
+            auth = tweepy.OAuth1UserHandler(
+                X_API_KEY, X_API_SECRET, X_ACCESS_TOKEN_EN, X_ACCESS_SECRET_EN
+            )
+            api_v1 = tweepy.API(auth)
+            media = api_v1.media_upload(filename="image.jpg", file=BytesIO(image_bytes))
+            media_ids = [media.media_id]
+
+        client_v2.create_tweet(text=text, media_ids=media_ids)
+        print("[X Hesap] Başarıyla paylaşıldı.")
+    except Exception as e:
+        print(f"[X Hesap] Paylaşım hatası: {e}")
+
 def main():
     if not BSKY_HANDLE_EN or not BSKY_APP_PASSWORD_EN:
         print("İngilizce Bluesky hesap bilgileri eksik.")
@@ -690,6 +732,10 @@ def main():
         print(f"[EN Hesap] Başarıyla paylaşıldı: {title_en}")
     except Exception as e:
         print(f"[EN Hesap] Paylaşım hatası: {e}")
+
+    # X (İNGİLİZCE) PAYLAŞIM — URL içermez, yalnızca madde başlığı + anlatı
+    x_text = build_x_text(title_en, narrative_en, emoji)
+    post_to_x(x_text, image_bytes=image_bytes)
 
     # 2. HESAP: TÜRKÇE PAYLAŞIM
     if BSKY_HANDLE_TR and BSKY_APP_PASSWORD_TR:
