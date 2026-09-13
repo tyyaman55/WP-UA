@@ -36,7 +36,7 @@ GITHUB_BRANCH = os.environ.get("GITHUB_BRANCH", "main")
 STATE_FILE = "posted_articles.txt"
 
 HEADERS = {
-    "User-Agent": "BlueskyUnusualWikiBot/5.9 (https://bsky.app/; dual-language curated bot)"
+    "User-Agent": "UnusualWikiBot/1.0 (posts curated Wikipedia oddities to Bluesky EN/TR & X)"
 }
 
 GITHUB_API_HEADERS = {
