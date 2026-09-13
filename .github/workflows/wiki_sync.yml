@@ -26,7 +26,7 @@ jobs:
 
       - name: Bağımlılıkları Yükle
         run: |
-          pip install atproto requests pillow
+          pip install atproto requests pillow tweepy
 
       - name: Botu Çalıştır
         env:
